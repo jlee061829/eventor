@@ -485,7 +485,50 @@ export default function ManageEventPage() {
         (eventData.status === "inviting" && (
           <div className="p-6 bg-white rounded shadow-md border border-gray-200">
             <h2 className="text-xl font-semibold mb-4">Invite Participants</h2>
-            {/* ... (invitation form code from Phase 3) ... */}
+            <form onSubmit={handleInvite}>
+              <div className="mb-4">
+                <label
+                  htmlFor="inviteEmail"
+                  className="block text-gray-700 font-semibold mb-2"
+                >
+                  Participant Email:
+                </label>
+                <input
+                  type="email"
+                  id="inviteEmail"
+                  value={inviteEmail} // Make sure 'inviteEmail' state exists
+                  onChange={(e) => {
+                    setInviteEmail(e.target.value);
+                    setInviteError(null); // Clear error on typing
+                    setInviteSuccess(null); // Clear success on typing
+                  }}
+                  required
+                  className="w-full px-3 py-2 border rounded text-gray-700 focus:outline-none focus:ring focus:border-blue-300"
+                  placeholder="example@email.com"
+                />
+              </div>
+
+              {/* Display feedback messages */}
+              {inviteError && (
+                <p className="text-red-500 text-sm mb-3">{inviteError}</p>
+              )}
+              {inviteSuccess && (
+                <p className="text-green-600 text-sm mb-3">{inviteSuccess}</p>
+              )}
+
+              {/* Submit Button */}
+              <button
+                type="submit"
+                disabled={isInviting || !inviteEmail.trim()} // Ensure 'isInviting' state exists
+                className={`w-full py-2 px-4 rounded text-white font-semibold ${
+                  isInviting || !inviteEmail.trim()
+                    ? "bg-gray-400 cursor-not-allowed"
+                    : "bg-green-500 hover:bg-green-600"
+                }`}
+              >
+                {isInviting ? "Sending..." : "Send Invitation"}
+              </button>
+            </form>
             <form onSubmit={handleInvite}>
               <div className="mb-4">
                 <label
@@ -516,6 +559,7 @@ export default function ManageEventPage() {
               )}
               <button
                 type="submit"
+                // Check these variables: is isInviting true? Is inviteEmail empty or just spaces?
                 disabled={isInviting || !inviteEmail.trim()}
                 className={`w-full py-2 px-4 rounded text-white font-semibold ${
                   isInviting || !inviteEmail.trim()
@@ -523,8 +567,7 @@ export default function ManageEventPage() {
                     : "bg-green-500 hover:bg-green-600"
                 }`}
               >
-                {" "}
-                {isInviting ? "Sending..." : "Send Invitation"}{" "}
+                {isInviting ? "Sending..." : "Send Invitation"}
               </button>
             </form>
           </div>
