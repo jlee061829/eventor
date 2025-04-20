@@ -55,7 +55,7 @@ interface EventData {
 // --- Component Start ---
 export default function ManageEventPage() {
   // --- State Variables (Keep your existing state) ---
-  const { user: currentUser, userProfile } = useAuth(); // Assuming useAuth provides userProfile with role
+  const { currentUser } = useAuth(); // Assuming useAuth provides userProfile with role
   const router = useRouter();
   const params = useParams();
   const eventId = params.eventId as string;
