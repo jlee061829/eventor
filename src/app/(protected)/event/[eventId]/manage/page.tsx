@@ -22,7 +22,6 @@ import {
   Timestamp,
   runTransaction,
   documentId,
-  deleteDoc,
 } from "firebase/firestore";
 
 // --- Interfaces ---
