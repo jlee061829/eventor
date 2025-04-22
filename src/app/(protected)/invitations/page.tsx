@@ -34,7 +34,12 @@ export default function InvitationsPage() {
   );
 
   const fetchInvites = useCallback(async () => {
-    if (!currentUser || !currentUser.email) return;
+    if (!currentUser || !currentUser.email) {
+      console.log("FetchInvites: currentUser or email missing", currentUser);
+      return;
+    }
+
+    console.log("Fetching invites for email:", currentUser.email);
 
     setLoading(true);
     setError(null);
@@ -163,7 +168,8 @@ export default function InvitationsPage() {
               >
                 <div>
                   <p className="text-lg font-semibold text-gray-800">
-                    {invite.eventName || `Invite to Event ID: ${invite.eventId}`}
+                    {invite.eventName ||
+                      `Invite to Event ID: ${invite.eventId}`}
                   </p>
                   <p className="text-sm text-gray-500">
                     Sent by: {invite.sentBy}

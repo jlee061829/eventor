@@ -4,8 +4,8 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { useAuth } from "@/contexts/AuthContext"; // Make sure this path is correct
-import { db } from "@/firebase.config"; // Make sure this path is correct
+import { useAuth } from "@/contexts/AuthContext";
+import { db } from "@/firebase.config";
 import {
   doc,
   getDoc,
@@ -14,6 +14,7 @@ import {
   addDoc,
   serverTimestamp,
   arrayUnion,
+  arrayRemove, // Ensure arrayRemove is imported
   query,
   where,
   getDocs,
@@ -21,16 +22,17 @@ import {
   Timestamp,
   runTransaction,
   documentId,
+  deleteDoc,
 } from "firebase/firestore";
 
-// --- Interfaces (Keep your existing interfaces) ---
+// --- Interfaces ---
 interface ParticipantProfile {
   uid: string;
   displayName: string;
+  email: string;
   role: string;
   teamId?: string | null;
 }
-
 interface TeamData {
   id: string;
   name: string;
@@ -39,7 +41,6 @@ interface TeamData {
   eventId: string;
   createdAt: Timestamp;
 }
-
 interface EventData {
   id: string;
   name: string;
@@ -51,10 +52,17 @@ interface EventData {
   availableForDraftIds: string[];
   createdAt: Timestamp;
 }
+// --- NEW: Score Input Interface (defined here) ---
+interface ScoreInput {
+  teamId: string;
+  teamName: string; // Added for convenience in UI/messages
+  currentPoints: string; // Value currently in the input field (string)
+  originalPoints: number | null; // Points fetched from DB (null if no score exists)
+  scoreDocId: string | null;
+}
 
-// --- Component Start ---
 export default function ManageEventPage() {
-  // --- State Variables ---
+  // --- State ---
   const { currentUser } = useAuth();
   const router = useRouter();
   const params = useParams();
@@ -67,193 +75,157 @@ export default function ManageEventPage() {
     []
   );
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [accessDenied, setAccessDenied] = useState(false); // New state for access control
+  const [error, setError] = useState<string | null>(null); // General/Action Error
+  const [accessDenied, setAccessDenied] = useState(false);
 
-  // Invite specific state
+  // Invite state
   const [inviteEmail, setInviteEmail] = useState("");
   const [isInviting, setIsInviting] = useState(false);
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteSuccess, setInviteSuccess] = useState<string | null>(null);
 
-  // Sub-event specific state
+  // Sub-event state
   const [subEventName, setSubEventName] = useState("");
+  const [subEventDescription, setSubEventDescription] = useState("");
   const [subEventLoading, setSubEventLoading] = useState(false);
   const [subEventError, setSubEventError] = useState<string | null>(null);
 
-  // Action loading state
-  const [actionLoading, setActionLoading] = useState(false);
+  // Action/Delete state
+  const [actionLoading, setActionLoading] = useState(false); // General loading for buttons like Activate, Start Draft
+  const [participantActionLoading, setParticipantActionLoading] = useState<
+    string | null
+  >(null); // Specific UID for Make/Remove Captain/Participant
+  const [isDeleting, setIsDeleting] = useState(false);
 
-  // --- Fetch Event Details (MODIFIED ACCESS CHECK) ---
+  // --- *** ADDED State for Score Entry *** ---
+  const [selectedSubEventIdForScoring, setSelectedSubEventIdForScoring] =
+    useState<string>("");
+  const [scoresForSelectedSubEvent, setScoresForSelectedSubEvent] = useState<
+    ScoreInput[]
+  >([]);
+  const [isSubmittingScores, setIsSubmittingScores] = useState(false);
+  const [scoreSubmitError, setScoreSubmitError] = useState<string | null>(null);
+  // --- *** END ADDED State *** ---
+
+  // --- Fetch Logic ---
   const fetchEventDetails = useCallback(async () => {
     if (!eventId || !currentUser) {
       setLoading(false);
-      setError("Authentication required to view event details.");
+      setError("Auth required.");
+      setEventData(null);
+      setAccessDenied(true);
       return;
     }
-
     setLoading(true);
     setError(null);
-    setAccessDenied(false); // Reset access denied state
+    setAccessDenied(false);
     setParticipants([]);
     setTeams([]);
     setSubEvents([]);
-
+    setEventData(null);
     try {
-      // Fetch Event Data first
       const eventDocRef = doc(db, "events", eventId);
       const eventDocSnap = await getDoc(eventDocRef);
-
       if (!eventDocSnap.exists()) {
-        throw new Error("Event not found.");
+        throw new Error(`Event not found: ${eventId}`);
       }
-
       const fetchedEventData = {
         id: eventDocSnap.id,
         ...eventDocSnap.data(),
       } as EventData;
-
-      // --- *** MODIFIED ACCESS CHECK *** ---
-      // Check if the current user is EITHER the admin OR a participant
       const isAdmin = fetchedEventData.adminId === currentUser.uid;
-      // Ensure participantIds exists and is an array before checking includes
-      const isParticipant =
-        Array.isArray(fetchedEventData.participantIds) &&
-        fetchedEventData.participantIds.includes(currentUser.uid);
-
+      const isParticipant = (fetchedEventData.participantIds ?? []).includes(
+        currentUser.uid
+      );
       if (!isAdmin && !isParticipant) {
-        // If user is NEITHER admin nor participant, deny access
         setAccessDenied(true);
-        setEventData(null); // Clear data if access denied
-      } else {
-        // If user IS admin or participant, proceed
-        setEventData(fetchedEventData);
-
-        // Fetch Participants (if needed for display - consider optimizing if only admin needs full list)
-        if (
-          fetchedEventData.participantIds &&
-          fetchedEventData.participantIds.length > 0
-        ) {
-          const usersCollectionRef = collection(db, "users");
-          // Handle potential chunking for > 30 participants
-          const participantChunks = [];
-          for (let i = 0; i < fetchedEventData.participantIds.length; i += 30) {
-            participantChunks.push(
-              fetchedEventData.participantIds.slice(i, i + 30)
-            );
-          }
-          const participantPromises = participantChunks.map((chunk) =>
-            getDocs(query(usersCollectionRef, where(documentId(), "in", chunk)))
+        return;
+      }
+      setEventData(fetchedEventData);
+      if (fetchedEventData.participantIds?.length > 0) {
+        const usersCollectionRef = collection(db, "users");
+        const participantChunks = [];
+        for (let i = 0; i < fetchedEventData.participantIds.length; i += 30) {
+          participantChunks.push(
+            fetchedEventData.participantIds.slice(i, i + 30)
           );
-          const participantSnapshots = await Promise.all(participantPromises);
-          const fetchedParticipants = participantSnapshots.flatMap((snapshot) =>
-            snapshot.docs.map(
-              (doc) =>
-                ({
-                  uid: doc.id,
-                  displayName: doc.data().displayName || "N/A",
-                  role: doc.data().role || "participant",
-                  teamId: doc.data().teamId || null,
-                } as ParticipantProfile)
-            )
-          );
-          setParticipants(fetchedParticipants);
-        } else {
-          setParticipants([]);
         }
-
-        // Fetch Teams
-        const teamsCollectionRef = collection(db, "teams");
-        const teamsQuery = query(
-          teamsCollectionRef,
-          where("eventId", "==", eventId)
+        const participantPromises = participantChunks.map((chunk) =>
+          getDocs(query(usersCollectionRef, where(documentId(), "in", chunk)))
         );
-        const teamsSnapshot = await getDocs(teamsQuery);
-        const fetchedTeams = teamsSnapshot.docs.map(
-          (doc) =>
-            ({
-              id: doc.id,
-              ...doc.data(),
-            } as TeamData)
+        const participantSnapshots = await Promise.all(participantPromises);
+        const fetchedParticipants = participantSnapshots.flatMap((snapshot) =>
+          snapshot.docs.map((d) => {
+            const data = d.data();
+            return {
+              uid: d.id,
+              displayName: data.displayName || "N/A",
+              email: data.email || "",
+              role: data.role || "participant",
+              teamId: data.teamId || null,
+            } as ParticipantProfile;
+          })
         );
-        setTeams(fetchedTeams);
-
-        // Fetch Sub-Events
-        const subEventsQuery = query(
-          collection(db, "subEvents"),
-          where("eventId", "==", eventId)
-        );
-        const subEventsSnapshot = await getDocs(subEventsQuery);
-        const fetchedSubEvents = subEventsSnapshot.docs.map((doc) => ({
-          id: doc.id,
-          name: doc.data().name || "Unnamed Sub-Event",
-        }));
-        setSubEvents(fetchedSubEvents);
+        setParticipants(fetchedParticipants);
+      } else {
+        setParticipants([]);
       }
-      // --- *** END MODIFIED ACCESS CHECK *** ---
+      const teamsCollectionRef = collection(db, "teams");
+      const teamsQuery = query(
+        teamsCollectionRef,
+        where("eventId", "==", eventId)
+      );
+      const teamsSnapshot = await getDocs(teamsQuery);
+      const fetchedTeams = teamsSnapshot.docs.map(
+        (d) => ({ id: d.id, ...d.data() } as TeamData)
+      );
+      setTeams(fetchedTeams);
+      const subEventsQuery = query(
+        collection(db, "subEvents"),
+        where("eventId", "==", eventId)
+      );
+      const subEventsSnapshot = await getDocs(subEventsQuery);
+      const fetchedSubEvents = subEventsSnapshot.docs.map((d) => ({
+        id: d.id,
+        name: d.data().name || "Unnamed",
+      }));
+      setSubEvents(fetchedSubEvents);
     } catch (err: any) {
-      console.error("Error fetching event details:", err);
-      // If the error wasn't explicitly set to access denied, show general error
-      if (!accessDenied) {
-        setError("Failed to load event data. " + err.message);
-      }
+      console.error("Fetch Error:", err);
+      setError(`Load failed: ${err.message}`);
+      setEventData(null);
     } finally {
       setLoading(false);
     }
-  }, [eventId, currentUser]); // Removed router from dependencies as it wasn't used here
+  }, [eventId, currentUser]);
 
   useEffect(() => {
     if (currentUser && eventId) {
       fetchEventDetails();
     } else if (!currentUser) {
       setLoading(false);
-      setError("Authentication required.");
-      setEventData(null); // Clear data if user logs out
+      setError("Auth required.");
+      setEventData(null);
     }
   }, [currentUser, eventId, fetchEventDetails]);
 
-  // --- Handler Functions (No logical change needed, security rules enforce permissions) ---
+  // --- Handlers ---
   const handleInvite = async (e: React.FormEvent) => {
+    /* ... keep existing handleInvite logic ... */
     e.preventDefault();
     if (!inviteEmail.trim() || !eventData || !currentUser) {
-      setInviteError("Email required, event loaded, and user logged in.");
+      setInviteError("Data missing.");
       return;
     }
     if (!/\S+@\S+\.\S+/.test(inviteEmail)) {
-      setInviteError("Invalid email format.");
+      setInviteError("Invalid email.");
       return;
     }
-    // --- Console logs for debugging (can be removed later) ---
-    console.log("--- Invite Debug ---");
-    console.log("Event ID:", eventData?.id);
-    console.log("Event Admin ID:", eventData?.adminId);
-    console.log("Current User UID:", currentUser?.uid);
-    console.log("Is Admin?:", currentUser?.uid === eventData?.adminId);
-    console.log(
-      "Event Name:",
-      eventData?.name,
-      "| Type:",
-      typeof eventData?.name
-    );
-    console.log("--------------------");
-    // --- End logs ---
     setIsInviting(true);
     setInviteError(null);
     setInviteSuccess(null);
     const emailToInvite = inviteEmail.trim().toLowerCase();
     try {
-      // Duplicate Check (Client-side check, consider Cloud Function for robustness)
-      const invitesCol = collection(db, "invites");
-      const q = query(
-        invitesCol,
-        where("eventId", "==", eventData.id),
-        where("recipientEmail", "==", emailToInvite)
-      );
-      const existingInviteSnap = await getDocs(q);
-      if (!existingInviteSnap.empty) {
-        throw new Error(`${emailToInvite} already invited/accepted.`);
-      }
-      // 1. Create invite doc
       await addDoc(collection(db, "invites"), {
         eventId: eventData.id,
         recipientEmail: emailToInvite,
@@ -262,68 +234,65 @@ export default function ManageEventPage() {
         createdAt: serverTimestamp(),
         eventName: eventData.name,
       });
-      // 2. Update event doc (participantEmails)
-      const eventRef = doc(db, "events", eventData.id);
-      await updateDoc(eventRef, {
+      await updateDoc(doc(db, "events", eventData.id), {
         participantEmails: arrayUnion(emailToInvite),
       });
-      setInviteSuccess(`Invitation sent to ${emailToInvite}!`);
+      setInviteSuccess(`Invited ${emailToInvite}!`);
       setInviteEmail("");
     } catch (err: any) {
-      console.error("Error sending invitation:", err);
-      setInviteError(err.message || "Failed to send invitation.");
+      console.error("Invite Error:", err);
+      setInviteError(err.message || "Invite failed.");
     } finally {
       setIsInviting(false);
     }
   };
-
   const handleCreateSubEvent = async (e: React.FormEvent) => {
+    /* ... keep existing handleCreateSubEvent logic ... */
     e.preventDefault();
     if (
       !eventData ||
       !subEventName.trim() ||
+      !subEventDescription.trim() ||
       !currentUser ||
       currentUser.uid !== eventData.adminId
     ) {
-      setSubEventError("Invalid input or permission denied.");
+      setSubEventError("Name/Desc required & Admin only.");
       return;
     }
     setSubEventLoading(true);
     setSubEventError(null);
     try {
-      const subEventsCollectionRef = collection(db, "subEvents");
-      await addDoc(subEventsCollectionRef, {
-        eventId: eventData.id, // Use confirmed non-null eventData
+      await addDoc(collection(db, "subEvents"), {
+        eventId: eventData.id,
         name: subEventName.trim(),
-        assignedParticipants: {}, // Initialize empty map
-        status: "upcoming", // Initial status
+        description: subEventDescription.trim(),
+        assignedParticipants: {},
+        manualAssignments: [],
+        status: "upcoming",
         createdAt: serverTimestamp(),
       });
       setSubEventName("");
-      const subEventsQuery = query(
+      setSubEventDescription("");
+      const q = query(
         collection(db, "subEvents"),
         where("eventId", "==", eventId)
       );
-      const subEventsSnapshot = await getDocs(subEventsQuery);
-      const fetchedSubEvents = subEventsSnapshot.docs.map((doc) => ({
-        id: doc.id,
-        name: doc.data().name || "Unnamed",
+      const snap = await getDocs(q);
+      const fetched = snap.docs.map((d) => ({
+        id: d.id,
+        name: d.data().name || "Unnamed",
       }));
-      setSubEvents(fetchedSubEvents);
-      // Option 2: Refetch everything (simpler if other state might change)
-      // fetchEventDetails();
+      setSubEvents(fetched);
     } catch (err: any) {
-      console.error("Error creating sub-event:", err);
-      setSubEventError("Failed to create sub-event. " + err.message);
+      console.error("Sub-Event Create Error:", err);
+      setSubEventError(`Create failed: ${err.message}`);
     } finally {
       setSubEventLoading(false);
     }
   };
-
   const handleMakeCaptain = async (participant: ParticipantProfile) => {
-    if (!eventData || !currentUser) return;
-    // Client-side checks (optional, rules enforce)
-    if (currentUser.uid !== eventData.adminId) {
+    /* ... keep existing handleMakeCaptain logic ... */
+    if (!eventData || !currentUser || currentUser.uid !== eventData.adminId) {
       setError("Permission Denied.");
       return;
     }
@@ -332,52 +301,44 @@ export default function ManageEventPage() {
       return;
     }
     if (participant.role !== "participant") {
-      setError(`${participant.displayName} already a ${participant.role}.`);
+      setError(`${participant.displayName} not assignable.`);
       return;
     }
-
     setActionLoading(true);
     setError(null);
     const batch = writeBatch(db);
     const userRef = doc(db, "users", participant.uid);
     const newTeamRef = doc(collection(db, "teams"));
+    const eventRef = doc(db, "events", eventData.id);
     try {
-      const existingTeamNumbers = teams.map((t) =>
+      const nums = teams.map((t) =>
         parseInt(t.name.match(/\d+$/)?.[0] || "0", 10)
       );
-      const nextTeamNumber = Math.max(0, ...existingTeamNumbers) + 1;
-      // Create Team
+      const nextNum = Math.max(0, ...nums) + 1;
       batch.set(newTeamRef, {
         eventId: eventData.id,
-        name: `Team ${nextTeamNumber}`,
+        name: `Team ${nextNum}`,
         captainId: participant.uid,
         memberIds: [participant.uid],
         createdAt: serverTimestamp(),
       });
-      // Update User Role & Team ID
       batch.update(userRef, { role: "captain", teamId: newTeamRef.id });
-      // Update Event's Available For Draft List
-      const eventRef = doc(db, "events", eventData.id);
       batch.update(eventRef, {
-        availableForDraftIds: (eventData.availableForDraftIds || []).filter(
-          (id) => id !== participant.uid
-        ),
+        availableForDraftIds: arrayRemove(participant.uid),
       });
       await batch.commit();
-      console.log(`${participant.displayName} promoted to captain`);
-      fetchEventDetails(); // Refetch needed
+      console.log(`${participant.displayName} is Captain of Team ${nextNum}`);
+      fetchEventDetails();
     } catch (err: any) {
-      console.error("Error making captain:", err);
-      setError(`Failed to make captain: ${err.message}`);
+      console.error("Make Captain Error:", err);
+      setError(`Make captain failed: ${err.message}`);
     } finally {
       setActionLoading(false);
     }
   };
-
   const handleStartDraft = async () => {
-    if (!eventData || !currentUser) return;
-    // Client-side checks (optional, rules enforce)
-    if (currentUser.uid !== eventData.adminId) {
+    /* ... keep existing handleStartDraft logic ... */
+    if (!eventData || !currentUser || currentUser.uid !== eventData.adminId) {
       setError("Permission Denied.");
       return;
     }
@@ -386,168 +347,511 @@ export default function ManageEventPage() {
       return;
     }
     if (["drafting", "active", "completed"].includes(eventData.status)) {
-      setError(`Event status '${eventData.status}' prevents starting draft.`);
+      setError(`Status '${eventData.status}' prevents starting draft.`);
       return;
     }
-    if ((eventData.availableForDraftIds || []).length === 0) {
-      setError("No participants available to draft.");
+    if ((eventData.availableForDraftIds ?? []).length === 0) {
+      setError("No participants available.");
       return;
     }
-
     setActionLoading(true);
     setError(null);
     const draftRef = doc(db, "drafts", eventId);
-    const eventRef = doc(db, "events", eventId);
-    const teamIds = teams.map((team) => team.id);
-    const shuffleArray = (array: string[]) => {
-      /* ... keep shuffle logic ... */
-      for (let i = array.length - 1; i > 0; i--) {
+    const eventRef = doc(db, "events", eventData.id);
+    const teamIds = teams.map((t) => t.id);
+    const shuffle = (a: string[]) => {
+      for (let i = a.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
-        [array[i], array[j]] = [array[j], array[i]];
+        [a[i], a[j]] = [a[j], a[i]];
       }
-      return array;
+      return a;
     };
-    const randomizedPickOrder = shuffleArray([...teamIds]);
+    const order = shuffle([...teamIds]);
     try {
-      await runTransaction(db, async (transaction) => {
-        const freshEventSnap = await transaction.get(eventRef);
-        if (!freshEventSnap.exists()) {
-          throw new Error("Event disappeared.");
-        }
-        const freshEventData = freshEventSnap.data();
+      await runTransaction(db, async (t) => {
+        const snap = await t.get(eventRef);
+        if (!snap.exists()) throw new Error("Event gone.");
+        const data = snap.data();
         if (
-          !freshEventData ||
-          !["setup", "inviting", "assigningCaptains"].includes(
-            freshEventData.status
-          )
-        ) {
-          throw new Error(
-            `Event status (${freshEventData?.status}) prevents starting draft.`
-          );
-        }
-        // Set draft doc
-        transaction.set(draftRef, {
+          !data ||
+          ![
+            "setup",
+            "inviting",
+            "assigningCaptains",
+            "active",
+            "open",
+          ].includes(data.status)
+        )
+          throw new Error(`Status (${data?.status}) prevents draft.`);
+        t.set(draftRef, {
           eventId: eventData.id,
           status: "active",
-          pickOrder: randomizedPickOrder,
+          pickOrder: order,
           currentPickIndex: 0,
           roundNumber: 1,
           totalPicksMade: 0,
           lastPickTimestamp: serverTimestamp(),
         });
-        // Update event status
-        transaction.update(eventRef, { status: "drafting" });
+        t.update(eventRef, { status: "drafting" });
       });
       console.log("Draft started!");
-      fetchEventDetails(); // Refresh state
+      fetchEventDetails();
     } catch (err: any) {
-      console.error("Error starting draft:", err);
-      setError(`Failed to start draft: ${err.message}`);
+      console.error("Start Draft Error:", err);
+      setError(`Start draft failed: ${err.message}`);
     } finally {
       setActionLoading(false);
     }
   };
-
-  // --- *** RENDER LOGIC *** ---
-
-  // Determine if the current user is the admin for this specific event
-  const isAdmin = currentUser?.uid === eventData?.adminId;
-
-  // --- Loading, Access Denied, Error Handling ---
-  if (loading)
-    return (
-      <div className="container mx-auto p-4 text-center">
-        Loading event details...
-      </div>
+  const handleDeleteEvent = async () => {
+    /* ... keep existing handleDeleteEvent logic ... */
+    if (!eventData || !currentUser || currentUser.uid !== eventData.adminId) {
+      setError("Permission denied.");
+      return;
+    }
+    const conf = window.confirm(
+      `DELETE event "${eventData.name}" permanently?`
     );
-  if (accessDenied)
-    return (
-      <div className="container mx-auto p-4 text-center text-red-500">
-        Access Denied: You are not authorized to view this event.
-      </div>
+    if (!conf) return;
+    setIsDeleting(true);
+    setError(null);
+    try {
+      const batch = writeBatch(db);
+      const eventRef = doc(db, "events", eventId);
+      const draftRef = doc(db, "drafts", eventId);
+      const relatedQueries = [
+        query(collection(db, "invites"), where("eventId", "==", eventId)),
+        query(collection(db, "teams"), where("eventId", "==", eventId)),
+        query(collection(db, "subEvents"), where("eventId", "==", eventId)),
+        query(collection(db, "scores"), where("eventId", "==", eventId)),
+      ];
+      const snapshots = await Promise.all(
+        relatedQueries.map((q) => getDocs(q))
+      );
+      snapshots.forEach((snap) => snap.forEach((d) => batch.delete(d.ref)));
+      const draftSnap = await getDoc(draftRef);
+      if (draftSnap.exists()) batch.delete(draftRef);
+      batch.delete(eventRef);
+      await batch.commit();
+      console.log(`Event ${eventData.name} deleted.`);
+      alert("Event deleted!");
+      router.push("/dashboard");
+    } catch (err: any) {
+      console.error("Delete Event Error:", err);
+      setError(`Delete failed: ${err.message}`);
+      setIsDeleting(false);
+    }
+  };
+  const handleActivateEvent = async () => {
+    /* ... keep existing handleActivateEvent logic ... */
+    if (!eventData || !currentUser || currentUser.uid !== eventData.adminId) {
+      setError("Permission Denied.");
+      return;
+    }
+    if (
+      ["active", "open", "drafting", "completed"].includes(eventData.status)
+    ) {
+      setError(`Already active/completed.`);
+      return;
+    }
+    setActionLoading(true);
+    setError(null);
+    const eventRef = doc(db, "events", eventData.id);
+    try {
+      await updateDoc(eventRef, { status: "active" });
+      console.log("Event activated.");
+      fetchEventDetails();
+    } catch (err: any) {
+      console.error("Activate Error:", err);
+      setError(`Activation failed: ${err.message}`);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+  const handleRemoveCaptain = async (participant: ParticipantProfile) => {
+    /* ... keep existing handleRemoveCaptain logic ... */
+    if (
+      !eventData ||
+      !currentUser ||
+      currentUser.uid !== eventData.adminId ||
+      participant.role !== "captain" ||
+      !participant.teamId
+    ) {
+      setError("Invalid request.");
+      return;
+    }
+    const conf = window.confirm(
+      `Remove ${participant.displayName} as captain and delete their team?`
     );
-  if (error)
-    return <div className="container mx-auto p-4 text-red-500">{error}</div>;
-  // If eventData is null after loading without error/accessDenied, something unexpected happened
+    if (!conf) return;
+    setParticipantActionLoading(participant.uid);
+    setError(null);
+    const batch = writeBatch(db);
+    const userRef = doc(db, "users", participant.uid);
+    const teamRef = doc(db, "teams", participant.teamId);
+    const eventRef = doc(db, "events", eventData.id);
+    try {
+      batch.update(userRef, { role: "participant", teamId: null });
+      batch.delete(teamRef);
+      if (!["drafting", "completed"].includes(eventData.status)) {
+        batch.update(eventRef, {
+          availableForDraftIds: arrayUnion(participant.uid),
+        });
+      }
+      await batch.commit();
+      console.log(`${participant.displayName} removed as captain.`);
+      fetchEventDetails();
+    } catch (err: any) {
+      console.error("Remove Captain Error:", err);
+      setError(`Remove captain failed: ${err.message}`);
+    } finally {
+      setParticipantActionLoading(null);
+    }
+  };
+  const handleRemoveParticipant = async (participant: ParticipantProfile) => {
+    /* ... keep existing handleRemoveParticipant logic ... */
+    if (!eventData || !currentUser || currentUser.uid !== eventData.adminId) {
+      setError("Permission Denied.");
+      return;
+    }
+    if (participant.uid === eventData.adminId) {
+      setError("Admin cannot be removed.");
+      return;
+    }
+    const conf = window.confirm(
+      `Remove ${participant.displayName} from event?`
+    );
+    if (!conf) return;
+    setParticipantActionLoading(participant.uid);
+    setError(null);
+    const batch = writeBatch(db);
+    const userRef = doc(db, "users", participant.uid);
+    const eventRef = doc(db, "events", eventData.id);
+    try {
+      batch.update(userRef, { currentEventId: null, teamId: null });
+      batch.update(eventRef, {
+        participantIds: arrayRemove(participant.uid),
+        availableForDraftIds: arrayRemove(participant.uid),
+        participantEmails: arrayRemove(participant.email),
+      });
+      if (participant.teamId) {
+        batch.update(doc(db, "teams", participant.teamId), {
+          memberIds: arrayRemove(participant.uid),
+        });
+      }
+      if (participant.email) {
+        const q = query(
+          collection(db, "invites"),
+          where("eventId", "==", eventId),
+          where("recipientEmail", "==", participant.email)
+        );
+        const snap = await getDocs(q);
+        snap.forEach((d) => batch.delete(d.ref));
+      }
+      await batch.commit();
+      console.log(`${participant.displayName} removed.`);
+      fetchEventDetails();
+    } catch (err: any) {
+      console.error("Remove Ptpt Error:", err);
+      setError(`Remove failed: ${err.message}`);
+    } finally {
+      setParticipantActionLoading(null);
+    }
+  };
+
+  // --- *** ADDED Score Handlers *** ---
+  const handleSubEventSelectionForScoring = async (subEventId: string) => {
+    setSelectedSubEventIdForScoring(subEventId);
+    setScoreSubmitError(null);
+    setScoresForSelectedSubEvent([]); // Clear previous inputs
+
+    if (!subEventId || teams.length === 0) {
+      return; // Nothing to score or no teams
+    }
+
+    setIsSubmittingScores(true); // Use this as loading indicator for score fetch
+    try {
+      // Fetch existing scores for this sub-event and event
+      const scoresQuery = query(
+        collection(db, "scores"),
+        where("eventId", "==", eventId),
+        where("subEventId", "==", subEventId)
+      );
+      const scoreSnapshots = await getDocs(scoresQuery);
+      const existingScoresMap = new Map<
+        string,
+        { points: number; id: string }
+      >();
+      scoreSnapshots.forEach((doc) => {
+        const data = doc.data();
+        // Ensure points is stored as a number before adding to map
+        if (typeof data.points === "number") {
+          existingScoresMap.set(data.teamId, {
+            points: data.points,
+            id: doc.id,
+          });
+        } else {
+          console.warn(
+            `Invalid points data type found for score ${doc.id}, team ${data.teamId}`
+          );
+        }
+      });
+
+      // Initialize state based on teams, merging existing scores using the UPDATED interface
+      const initialScores: ScoreInput[] = teams.map((team) => {
+        const existing = existingScoresMap.get(team.id);
+        return {
+          teamId: team.id,
+          teamName: team.name, // Store team name
+          originalPoints: existing?.points ?? null, // Store original score (number or null)
+          scoreDocId: existing?.id ?? null, // Store existing doc ID (string or null)
+          currentPoints: existing?.points?.toString() ?? "", // Set input value (string)
+        };
+      });
+      setScoresForSelectedSubEvent(initialScores);
+    } catch (err: any) {
+      console.error("Error fetching existing scores:", err);
+      setScoreSubmitError(`Failed to load scores: ${err.message}`);
+      // Reset state correctly on error
+      setScoresForSelectedSubEvent(
+        teams.map((t) => ({
+          teamId: t.id,
+          teamName: t.name,
+          originalPoints: null,
+          scoreDocId: null,
+          currentPoints: "",
+        }))
+      );
+    } finally {
+      setIsSubmittingScores(false); // Finished fetching/initializing
+    }
+  };
+
+  const handleScoreChange = (teamId: string, value: string) => {
+    if (value === "" || value === "-" || /^-?[0-9]*$/.test(value)) {
+      setScoresForSelectedSubEvent((prevScores) =>
+        prevScores.map((score) =>
+          score.teamId === teamId ? { ...score, points: value } : score
+        )
+      );
+    }
+  };
+
+  const handleSubmitScores = async (e: React.FormEvent) => {
+    e.preventDefault();
+    // ... (initial checks remain the same) ...
+    if (
+      !selectedSubEventIdForScoring ||
+      scoresForSelectedSubEvent.length === 0 ||
+      !currentUser ||
+      currentUser.role !== "admin" ||
+      isSubmittingScores ||
+      !eventData
+    ) {
+      setScoreSubmitError("Select sub-event & be admin.");
+      return;
+    }
+    const subEvent = subEvents.find(
+      (se) => se.id === selectedSubEventIdForScoring
+    );
+    if (!subEvent) {
+      setScoreSubmitError("Sub-event not found.");
+      return;
+    }
+
+    setIsSubmittingScores(true);
+    setScoreSubmitError(null);
+    const batch = writeBatch(db);
+    const scoresCol = collection(db, "scores");
+    let changesMade = false;
+
+    try {
+      // Use a for...of loop to allow async operations inside if needed (though not strictly necessary here)
+      for (const scoreInput of scoresForSelectedSubEvent) {
+        // Use 'currentPoints' for the value from the input field
+        const pointsStr = scoreInput.currentPoints.trim();
+        // Determine the new points as a number or null (for deletion)
+        const newPointsNum = pointsStr === "" ? null : parseInt(pointsStr, 10);
+
+        // Validate input if it's not empty
+        if (pointsStr !== "" && isNaN(newPointsNum!)) {
+          throw new Error(
+            `Invalid score '${pointsStr}' for ${scoreInput.teamName}. Enter numbers only.`
+          );
+        }
+
+        // Compare the *numeric or null* new value with the *numeric or null* original value
+        if (newPointsNum !== scoreInput.originalPoints) {
+          changesMade = true; // Mark that at least one change occurred
+
+          // Use 'scoreDocId' to know if we update/delete or create
+          if (scoreInput.scoreDocId && newPointsNum !== null) {
+            // --- UPDATE ---
+            batch.update(doc(db, "scores", scoreInput.scoreDocId), {
+              points: newPointsNum, // Update points field
+            });
+          } else if (scoreInput.scoreDocId && newPointsNum === null) {
+            // --- DELETE ---
+            batch.delete(doc(db, "scores", scoreInput.scoreDocId));
+          } else if (!scoreInput.scoreDocId && newPointsNum !== null) {
+            // --- CREATE ---
+            const newScoreRef = doc(scoresCol); // Auto-ID
+            batch.set(newScoreRef, {
+              eventId: eventId,
+              subEventId: selectedSubEventIdForScoring,
+              teamId: scoreInput.teamId,
+              points: newPointsNum, // The new number
+              assignedBy: currentUser.uid,
+              assignedAt: serverTimestamp(),
+              subEventName: subEvent.name,
+              teamName: scoreInput.teamName, // Use stored team name
+            });
+          }
+          // Case: !scoreDocId && newPointsNum === null (No original, input empty) -> Do nothing
+        }
+      } // End loop
+
+      if (!changesMade) {
+        setScoreSubmitError("No changes made to scores."); // Set error instead of alert
+        setIsSubmittingScores(false);
+        return;
+      }
+
+      // ... (Optional sub-event status update) ...
+
+      await batch.commit();
+      alert(`Scores updated for ${subEvent.name}!`);
+      // Refetch scores AFTER commit to update originalPoints in state
+      handleSubEventSelectionForScoring(selectedSubEventIdForScoring);
+    } catch (err: any) {
+      console.error("Error submitting scores:", err);
+      setScoreSubmitError(`Update failed: ${err.message}`);
+    } finally {
+      setIsSubmittingScores(false);
+    }
+  };
+  // --- *** END ADDED Score Handlers *** ---
+
+  // --- Render Logic ---
+  if (loading) return <div className="loading">Loading...</div>;
+  if (accessDenied) return <div className="error">Access Denied.</div>;
+  if (
+    error &&
+    !isDeleting &&
+    !actionLoading &&
+    !participantActionLoading &&
+    !isSubmittingScores
+  )
+    return <div className="error">{error}</div>;
   if (!eventData)
     return (
-      <div className="container mx-auto p-4 text-center text-gray-500">
-        Event data could not be loaded.
+      <div className="loading">
+        {isDeleting ? "Deleting..." : "Event data not available."}
       </div>
     );
 
-  // --- Calculate status conditions based on fetched eventData ---
-  const canAssignCaptains = !["drafting", "active", "completed"].includes(
-    eventData.status
-  );
-  const canInvite = ["setup", "inviting"].includes(eventData.status);
+  const isAdmin = currentUser?.uid === eventData.adminId;
+  const isEventCompleted = eventData.status === "completed";
+  const canInvite = !isEventCompleted;
+  const canManageCaptains = !isEventCompleted;
+  const canCreateSubEvents = !isEventCompleted;
+  const canActivateEvent =
+    !isEventCompleted &&
+    !["active", "open", "drafting"].includes(eventData.status);
   const canStartDraft =
+    !isEventCompleted &&
+    eventData.status !== "drafting" &&
     teams.length === eventData.numberOfTeams &&
-    ["setup", "inviting", "assigningCaptains"].includes(eventData.status) &&
-    (eventData.availableForDraftIds || []).length > 0;
-  const isDraftingOrLater = ["drafting", "active", "completed"].includes(
+    (eventData.availableForDraftIds ?? []).length > 0;
+  const showDraftLink = ["drafting", "active", "open"].includes(
     eventData.status
   );
-  const canCreateSubEvents = !["setup", "inviting"].includes(eventData.status);
 
-  // --- Main Page Content ---
   return (
-    <div className="container mx-auto p-4 space-y-8">
-      {/* --- Event Info (Visible to Admin & Participants) --- */}
-      <div>
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4">
-          <h1 className="text-3xl font-bold mb-2 sm:mb-0">
-            Event: {eventData.name}
+    <div className="container mx-auto p-4 sm:p-6 lg:p-8 space-y-8">
+      {/* Event Info Section */}
+      <section className="bg-white p-6 rounded-lg shadow-md border border-gray-200">
+        {/* --- RESTORED Event Info JSX --- */}
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-4">
+          <h1 className="text-2xl sm:text-3xl font-bold text-slate-800">
+            {eventData.name}
           </h1>
-          <div className="space-x-2">
-            {isDraftingOrLater && (
+          <div className="flex-shrink-0 space-x-3 text-sm">
+            {showDraftLink && (
               <Link
                 href={`/event/${eventId}/draft`}
-                className="text-blue-600 hover:underline"
+                className="font-medium text-indigo-600 hover:text-indigo-800"
               >
                 View Draft
               </Link>
             )}
             <Link
               href={`/event/${eventId}/leaderboard`}
-              className="text-blue-600 hover:underline"
+              className="font-medium text-indigo-600 hover:text-indigo-800"
             >
               View Leaderboard
             </Link>
           </div>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-          <p>
-            <span className="font-semibold">Status:</span>{" "}
-            <span className={`font-medium $`}>{eventData.status}</span>
-          </p>
-          <p>
-            <span className="font-semibold">Required Teams:</span>{" "}
-            {eventData.numberOfTeams}
-          </p>
-          <p>
-            <span className="font-semibold">Created Teams:</span> {teams.length}
-          </p>
-          <p>
-            <span className="font-semibold">Participants:</span>{" "}
-            {participants.length}
-          </p>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm border-t border-gray-200 pt-4">
+          <div>
+            <p className="text-slate-500">Status</p>
+            <p className={`font-semibold`}>{eventData.status}</p>
+          </div>
+          <div>
+            <p className="text-slate-500">Required Teams</p>
+            <p className="font-semibold text-slate-700">
+              {eventData.numberOfTeams}
+            </p>
+          </div>
+          <div>
+            <p className="text-slate-500">Created Teams</p>
+            <p className="font-semibold text-slate-700">{teams.length}</p>
+          </div>
+          <div>
+            <p className="text-slate-500">Participants</p>
+            <p className="font-semibold text-slate-700">
+              {participants.length}
+            </p>
+          </div>
         </div>
-      </div>
+      </section>
 
-      {/* --- *** CONDITIONAL ADMIN SECTIONS *** --- */}
+      {/* Activate Event Button */}
+      {isAdmin && canActivateEvent && (
+        <section className="p-6 bg-white rounded-lg shadow-md border border-gray-200">
+          {/* --- RESTORED Activate Event JSX --- */}
+          <h2 className="text-xl font-semibold text-slate-800 mb-4">
+            Activate Event
+          </h2>
+          <p className="text-sm text-slate-600 mb-3">
+            Manually activate the event to allow activities.
+          </p>
+          <button
+            onClick={handleActivateEvent}
+            disabled={actionLoading}
+            className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-cyan-600 hover:bg-cyan-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-cyan-500 disabled:bg-gray-400 disabled:opacity-70"
+          >
+            {actionLoading ? "Activating..." : "Activate Event"}
+          </button>
+          {error && actionLoading && (
+            <p className="mt-3 text-sm text-red-600">{error}</p>
+          )}
+        </section>
+      )}
 
-      {/* Invitation Section (Admin Only) */}
+      {/* Invitation Section */}
       {isAdmin && canInvite && (
-        <div className="p-4 md:p-6 bg-white rounded shadow-md border border-gray-200">
-          <h2 className="text-xl text-gray-700 font-semibold mb-4">
+        <section className="p-6 bg-white rounded-lg shadow-md border border-gray-200">
+          {/* --- RESTORED Invitation JSX --- */}
+          <h2 className="text-xl font-semibold text-slate-800 mb-4">
             Invite Participants
           </h2>
-          <form onSubmit={handleInvite}>
-            <div className="mb-4">
+          <form onSubmit={handleInvite} className="space-y-4">
+            <div>
               <label
                 htmlFor="inviteEmail"
-                className="block text-gray-700 font-semibold mb-2"
+                className="block text-sm font-medium text-slate-700 mb-1"
               >
                 Participant Email:
               </label>
@@ -561,140 +865,192 @@ export default function ManageEventPage() {
                   setInviteSuccess(null);
                 }}
                 required
-                className="w-full px-3 py-2 border rounded text-gray-700 focus:outline-none focus:ring focus:border-blue-300"
-                placeholder="example@email.com"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm text-slate-900"
+                placeholder="participant@example.com"
               />
             </div>
             {inviteError && (
-              <p className="text-red-500 text-sm mb-3">{inviteError}</p>
+              <p className="text-sm text-red-600 bg-red-50 p-2 rounded-md">
+                {inviteError}
+              </p>
             )}
             {inviteSuccess && (
-              <p className="text-green-600 text-sm mb-3">{inviteSuccess}</p>
+              <p className="text-sm text-green-600 bg-green-50 p-2 rounded-md">
+                {inviteSuccess}
+              </p>
             )}
             <button
               type="submit"
               disabled={isInviting || !inviteEmail.trim()}
-              className={`w-full py-2 px-4 rounded text-white font-semibold ${
-                isInviting || !inviteEmail.trim()
-                  ? "bg-gray-400 cursor-not-allowed"
-                  : "bg-blue-500 hover:bg-blue-600"
-              }`}
+              className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:bg-gray-400 disabled:cursor-not-allowed"
             >
               {isInviting ? "Sending..." : "Send Invitation"}
             </button>
           </form>
-        </div>
+        </section>
       )}
 
-      {/* Captain Assignment Section (Admin Only) */}
-      {isAdmin && canAssignCaptains && (
-        <div className="p-4 md:p-6 bg-white rounded shadow-md border border-gray-200">
-          <h2 className="text-xl text-gray-700 font-semibold mb-4">
-            Assign Captains ({teams.length} / {eventData.numberOfTeams})
+      {/* Captain Management Section */}
+      {isAdmin && canManageCaptains && (
+        <section className="p-6 bg-white rounded-lg shadow-md border border-gray-200">
+          {/* --- RESTORED Captain Management JSX --- */}
+          <h2 className="text-xl font-semibold text-slate-800 mb-4">
+            Manage Captains & Teams ({teams.length} / {eventData.numberOfTeams})
           </h2>
-          {participants.length > 0 ? (
-            <ul className="space-y-2">
-              {participants.map((p) => (
-                <li
-                  key={p.uid}
-                  className="flex flex-col sm:flex-row justify-between items-start sm:items-center p-2 border-b"
-                >
-                  <span className="mb-1 text-gray-700 sm:mb-0">
-                    {p.displayName} ({p.role}){" "}
-                    {p.teamId &&
-                      `- ${
-                        teams.find((t) => t.id === p.teamId)?.name ||
-                        "Assigned Team"
-                      }`}
-                  </span>
-                  {p.role === "participant" &&
-                    teams.length < eventData.numberOfTeams && (
+          {teams.length > 0 && (
+            <div className="mb-4 border-b pb-4">
+              <h3 className="text-md font-medium text-slate-700 mb-2">
+                Current Teams
+              </h3>
+              <ul className="divide-y divide-gray-200">
+                {teams.map((team) => {
+                  const captainProfile = participants.find(
+                    (p) => p.uid === team.captainId
+                  );
+                  if (!captainProfile) return null;
+                  return (
+                    <li
+                      key={team.id}
+                      className="py-3 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2"
+                    >
+                      <div>
+                        <p className="text-sm font-medium text-slate-900">
+                          {team.name}
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          Captain: {captainProfile.displayName}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => handleRemoveCaptain(captainProfile)}
+                        disabled={
+                          participantActionLoading === captainProfile.uid
+                        }
+                        className="px-2.5 py-1.5 border border-red-300 text-xs font-medium rounded shadow-sm text-red-700 bg-red-50 hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-wait mt-1 sm:mt-0 self-start sm:self-center"
+                      >
+                        {participantActionLoading === captainProfile.uid
+                          ? "..."
+                          : "Remove Captain & Team"}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+          <h3 className="text-md font-medium text-slate-700 mb-2">
+            Assign New Captain
+          </h3>
+          {participants.filter((p) => p.role === "participant").length > 0 ? (
+            <ul className="divide-y divide-gray-200">
+              {participants
+                .filter((p) => p.role === "participant")
+                .map((p) => (
+                  <li
+                    key={p.uid}
+                    className="py-3 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2"
+                  >
+                    <div>
+                      <p className="text-sm font-medium text-slate-900">
+                        {p.displayName}
+                      </p>
+                      <p className="text-xs text-slate-500">Role: {p.role}</p>
+                    </div>
+                    {teams.length < eventData.numberOfTeams ? (
                       <button
                         onClick={() => handleMakeCaptain(p)}
-                        disabled={actionLoading}
-                        className="bg-purple-500 hover:bg-purple-700 text-white text-xs sm:text-sm font-bold py-1 px-2 rounded disabled:bg-gray-400 self-start sm:self-center"
+                        disabled={
+                          actionLoading || participantActionLoading === p.uid
+                        }
+                        className="px-2.5 py-1.5 border border-transparent text-xs font-medium rounded shadow-sm text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:bg-gray-400 disabled:opacity-70"
                       >
-                        {actionLoading ? "Assigning..." : "Make Captain"}
+                        {actionLoading || participantActionLoading === p.uid
+                          ? "..."
+                          : "Make Captain"}
                       </button>
+                    ) : (
+                      <span className="text-xs text-slate-400 italic">
+                        Max teams reached
+                      </span>
                     )}
-                  {p.role === "captain" && (
-                    <span className="text-sm text-green-600 font-semibold self-start sm:self-center">
-                      ✓ Captain
-                    </span>
-                  )}
-                </li>
-              ))}
+                  </li>
+                ))}
             </ul>
           ) : (
-            <p className="text-gray-500 italic">
-              No participants have accepted invitations yet.
+            <p className="text-sm text-slate-500 italic">
+              No available participants to assign.
             </p>
           )}
-          {error && <p className="text-red-500 text-sm mt-4">{error}</p>}
-        </div>
+          {error && (actionLoading || participantActionLoading) && (
+            <p className="mt-3 text-sm text-red-600">{error}</p>
+          )}
+        </section>
       )}
 
-      {/* Draft Control Section (Admin Only Actions) */}
-      {isAdmin && (
-        <div className="p-4 md:p-6 bg-white rounded shadow-md border border-gray-200">
-          <h2 className="text-xl font-semibold mb-4">Draft Control</h2>
-          {eventData.status === "drafting" && (
-            <p className="text-yellow-600 font-medium mb-4">
-              Draft is in progress.
-            </p>
-          )}
-          {canStartDraft && (
-            <button
-              onClick={handleStartDraft}
-              disabled={actionLoading}
-              className="bg-green-600 hover:bg-green-800 text-white font-bold py-2 px-4 rounded disabled:bg-gray-400 mr-2"
-            >
-              {actionLoading ? "Starting..." : "Start Draft"}
-            </button>
-          )}
-          {!isDraftingOrLater && teams.length !== eventData.numberOfTeams && (
-            <p className="text-gray-500 italic mt-2 text-sm">
-              Cannot start draft until exactly {eventData.numberOfTeams}{" "}
-              captains are assigned.
-            </p>
-          )}
-          {!isDraftingOrLater &&
-            teams.length === eventData.numberOfTeams &&
-            (eventData.availableForDraftIds || []).length === 0 && (
-              <p className="text-gray-500 italic mt-2 text-sm">
-                Cannot start draft - no participants available (besides
-                captains).
+      {/* Draft Control Section */}
+      {isAdmin && !isEventCompleted && (
+        <section className="p-6 bg-white rounded-lg shadow-md border border-gray-200">
+          {/* --- RESTORED Draft Control JSX --- */}
+          <h2 className="text-xl font-semibold text-slate-800 mb-4">
+            Draft Control
+          </h2>
+          <div className="space-y-3">
+            {eventData.status === "drafting" && (
+              <p className="text-sm font-medium text-yellow-700 bg-yellow-50 p-2 rounded-md">
+                Draft is in progress.
               </p>
             )}
-          {isDraftingOrLater && (
-            <Link
-              href={`/event/${eventId}/draft`}
-              className="bg-indigo-600 hover:bg-indigo-800 text-white font-bold py-2 px-4 rounded inline-block"
-            >
-              Go to Draft Page
-            </Link>
-          )}
-          {error && <p className="text-red-500 text-sm mt-4">{error}</p>}
-        </div>
+            {canStartDraft ? (
+              <button
+                onClick={handleStartDraft}
+                disabled={actionLoading}
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:bg-gray-400 disabled:opacity-70"
+              >
+                {actionLoading ? "Starting..." : "Start Draft"}
+              </button>
+            ) : (
+              eventData.status !== "drafting" && (
+                <p className="text-sm text-slate-500 italic">
+                  Draft cannot be started yet.
+                </p>
+              )
+            )}
+            {showDraftLink && (
+              <Link
+                href={`/event/${eventId}/draft`}
+                className="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md shadow-sm text-slate-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ml-3"
+              >
+                {" "}
+                Go to Draft Page{" "}
+              </Link>
+            )}
+            {error && actionLoading && (
+              <p className="mt-3 text-sm text-red-600">{error}</p>
+            )}
+          </div>
+        </section>
       )}
 
-      {/* --- Sections Visible to Admin & Participants --- */}
-
-      {/* Sub-Events Section (Create: Admin Only, List: All Authorized) */}
-      <div className="p-4 md:p-6 bg-white rounded shadow-md border border-gray-200">
-        <h2 className="text-xl text-gray-700 font-semibold mb-4">Sub-Events</h2>
-        {/* Create Form (Admin Only) */}
+      {/* Sub-Events Section */}
+      <section className="p-6 bg-white rounded-lg shadow-md border border-gray-200">
+        {/* --- RESTORED Sub-Events JSX --- */}
+        <h2 className="text-xl font-semibold text-slate-800 mb-5">
+          Sub-Events
+        </h2>
         {isAdmin && canCreateSubEvents && (
-          <form onSubmit={handleCreateSubEvent} className="mb-6 border-b pb-4">
-            <h3 className="text-lg text-gray-700 font-medium mb-2">
+          <form
+            onSubmit={handleCreateSubEvent}
+            className="mb-6 pb-6 border-b border-gray-200 space-y-4"
+          >
+            <h3 className="text-lg font-medium text-slate-900">
               Create New Sub-Event
             </h3>
-            <div className="mb-3">
+            <div>
               <label
                 htmlFor="subEventName"
-                className="block text-gray-700 font-semibold mb-1"
+                className="block text-sm font-medium text-slate-700 mb-1"
               >
-                Sub-Event Name:
+                Name:
               </label>
               <input
                 type="text"
@@ -702,100 +1058,281 @@ export default function ManageEventPage() {
                 value={subEventName}
                 onChange={(e) => setSubEventName(e.target.value)}
                 required
-                className="w-full px-3 py-2 border rounded text-gray-700 focus:outline-none focus:ring focus:border-blue-300"
-                placeholder="e.g., Trivia Challenge"
+                className="w-full px-3 py-2 border text-slate-700 border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                placeholder="e.g., Kickoff Challenge"
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="subEventDescription"
+                className="block text-sm font-medium text-slate-700 mb-1"
+              >
+                Description:
+              </label>
+              <textarea
+                id="subEventDescription"
+                value={subEventDescription}
+                onChange={(e) => setSubEventDescription(e.target.value)}
+                rows={3}
+                required
+                className="w-full px-3 py-2 border text-slate-700 border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                placeholder="Enter details..."
               />
             </div>
             {subEventError && (
-              <p className="text-red-500 text-sm mb-2">{subEventError}</p>
+              <p className="text-sm text-red-600">{subEventError}</p>
             )}
             <button
               type="submit"
-              disabled={subEventLoading}
-              className="bg-teal-500 hover:bg-teal-700 text-white font-semibold py-2 px-4 rounded disabled:bg-gray-400"
+              disabled={
+                subEventLoading ||
+                !subEventName.trim() ||
+                !subEventDescription.trim()
+              }
+              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-teal-600 hover:bg-teal-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-teal-500 disabled:bg-gray-400 disabled:opacity-70"
             >
               {subEventLoading ? "Creating..." : "Create Sub-Event"}
             </button>
           </form>
         )}
-        {/* List (Visible to All Authorized) */}
-        <h3 className="text-lg text-gray-700 font-medium mb-2">
+        <h3 className="text-lg font-medium text-slate-900 mb-3">
           Existing Sub-Events ({subEvents.length})
         </h3>
         {subEvents.length > 0 ? (
-          <ul className="space-y-2">
+          <ul className="divide-y divide-gray-200">
             {subEvents.map((sub) => (
               <li
                 key={sub.id}
-                className="flex justify-between items-center p-2 border rounded bg-gray-50"
+                className="py-3 flex justify-between items-center"
               >
-                <span>{sub.name}</span>
-                {/* Link to sub-event details - might need permission checks on that page too */}
+                <span className="text-sm font-medium text-slate-800">
+                  {sub.name}
+                </span>
                 <Link
                   href={`/event/${eventId}/sub-event/${sub.id}`}
-                  className="text-sm text-blue-600 hover:underline"
+                  className="text-sm font-medium text-indigo-600 hover:text-indigo-800"
                 >
-                  Manage/Score →
+                  Manage / Assign →
                 </Link>
               </li>
             ))}
           </ul>
         ) : (
-          <p className="text-gray-500 italic">No sub-events created yet.</p>
+          <p className="text-sm text-slate-500 italic">
+            No sub-events created yet.
+          </p>
         )}
-      </div>
+      </section>
 
-      {/* Participant List (Optional - Visible to All Authorized) */}
-      <div className="p-4 md:p-6 bg-white rounded shadow-md border border-gray-200">
-        <h2 className="text-xl text-gray-700 font-semibold mb-4">
+      {/* --- Score Entry Section (KEEP AS IS) --- */}
+      {isAdmin &&
+        teams.length > 0 &&
+        subEvents.length > 0 &&
+        !isEventCompleted && (
+          <section className="p-6 bg-white rounded-lg shadow-md border border-gray-200">
+            <h2 className="text-xl font-semibold text-slate-800 mb-4">
+              Enter Scores by Sub-Event
+            </h2>
+            <form onSubmit={handleSubmitScores} className="space-y-4">
+              {/* Sub-Event Selector */}
+              <div className="mb-4">
+                <label
+                  htmlFor="subEventSelect"
+                  className="block text-sm font-medium text-slate-700 mb-1"
+                >
+                  Select Sub-Event:
+                </label>
+                <select
+                  id="subEventSelect"
+                  value={selectedSubEventIdForScoring}
+                  onChange={(e) =>
+                    handleSubEventSelectionForScoring(e.target.value)
+                  }
+                  required
+                  className="w-full sm:w-auto px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm bg-white text-slate-900"
+                >
+                  <option value="" disabled>
+                    -- Select --
+                  </option>
+                  {subEvents.map((sub) => (
+                    <option key={sub.id} value={sub.id}>
+                      {sub.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {/* Score Inputs (Conditionally Rendered) */}
+              {selectedSubEventIdForScoring && (
+                <div className="space-y-3 pt-4 border-t border-gray-200">
+                  <h3 className="text-lg font-medium text-slate-900">
+                    Scores for:{" "}
+                    {subEvents.find(
+                      (s) => s.id === selectedSubEventIdForScoring
+                    )?.name || ""}
+                  </h3>
+                  <p className="text-xs text-slate-500 italic mb-3">
+                    Enter points. Leave blank to remove score.
+                  </p>
+                  {scoresForSelectedSubEvent.map((scoreInput) => {
+                    const team = teams.find((t) => t.id === scoreInput.teamId);
+                    if (!team) return null;
+                    return (
+                      <div
+                        key={scoreInput.teamId}
+                        className="flex flex-col sm:flex-row sm:items-center sm:space-x-3"
+                      >
+                        <label
+                          htmlFor={`score-${scoreInput.teamId}`}
+                          className="w-full sm:w-1/3 font-medium text-sm text-slate-700 mb-1 sm:mb-0 shrink-0"
+                        >
+                          {team.name}:
+                        </label>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          pattern="-?[0-9]*"
+                          id={`score-${scoreInput.teamId}`}
+                          // Bind value to currentPoints
+                          value={scoreInput.currentPoints}
+                          onChange={(e) =>
+                            handleScoreChange(scoreInput.teamId, e.target.value)
+                          }
+                          // Use originalPoints in placeholder
+                          placeholder={
+                            scoreInput.originalPoints !== null
+                              ? `Current: ${scoreInput.originalPoints}`
+                              : "Points"
+                          }
+                          className="w-full sm:w-2/3 px-3 py-1.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm text-slate-900"
+                        />
+                      </div>
+                    );
+                  })}
+                  {scoreSubmitError && (
+                    <p className="text-sm text-red-600 bg-red-50 p-2 rounded-md">
+                      {scoreSubmitError}
+                    </p>
+                  )}
+                  <button
+                    type="submit"
+                    disabled={isSubmittingScores}
+                    className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:bg-gray-400 disabled:opacity-70"
+                  >
+                    {isSubmittingScores ? "Saving..." : "Save / Update Scores"}
+                  </button>
+                </div>
+              )}
+              {!selectedSubEventIdForScoring && (
+                <p className="text-sm text-slate-500 italic">
+                  Select a sub-event above.
+                </p>
+              )}
+            </form>
+          </section>
+        )}
+      {isAdmin &&
+        (teams.length === 0 || subEvents.length === 0) &&
+        !isEventCompleted && (
+          <div className="p-6 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-700 shadow-md">
+            {" "}
+            Cannot enter scores yet.
+          </div>
+        )}
+
+      {/* --- Participant List Section (RESTORED JSX) --- */}
+      <section className="p-6 bg-white rounded-lg shadow-md border border-gray-200">
+        <h2 className="text-xl font-semibold text-slate-800 mb-4">
           Participants ({participants.length})
         </h2>
         {participants.length > 0 ? (
-          <ul className="space-y-2">
+          <ul className="divide-y divide-gray-200">
             {participants.map((p) => (
-              <li key={p.uid} className="text-gray-500 p-2 border-b">
-                {p.displayName} ({p.role}){" "}
-                {p.teamId &&
-                  `- ${
-                    teams.find((t) => t.id === p.teamId)?.name ||
-                    "Assigned Team"
-                  }`}
+              <li
+                key={p.uid}
+                className="py-3 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2"
+              >
+                <div>
+                  <p className="text-sm font-medium text-slate-900">
+                    {p.displayName} {p.uid === currentUser?.uid ? "(You)" : ""}
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    {p.role}{" "}
+                    {p.teamId &&
+                      `- Team: ${
+                        teams.find((t) => t.id === p.teamId)?.name || "N/A"
+                      }`}
+                  </p>
+                </div>
+                {isAdmin && !isEventCompleted && p.uid !== currentUser?.uid && (
+                  <button
+                    onClick={() => handleRemoveParticipant(p)}
+                    disabled={participantActionLoading === p.uid}
+                    className="px-2.5 py-1.5 border border-red-300 text-xs font-medium rounded shadow-sm text-red-700 bg-red-50 hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-wait mt-1 sm:mt-0 self-start sm:self-center"
+                  >
+                    {participantActionLoading === p.uid
+                      ? "..."
+                      : "Remove Participant"}
+                  </button>
+                )}
               </li>
             ))}
           </ul>
         ) : (
-          <p className="text-gray-500 italic">
+          <p className="text-sm text-slate-500 italic">
             No participants have joined yet.
           </p>
         )}
-      </div>
+        {error && participantActionLoading && (
+          <p className="mt-3 text-sm text-red-600">{error}</p>
+        )}
+      </section>
 
-      {/* Team List (Optional - Visible to All Authorized) */}
-      <div className="p-4 md:p-6 bg-white rounded shadow-md border border-gray-200">
-        <h2 className="text-xl text-gray-700 font-semibold mb-4">
+      {/* --- Team List Section (RESTORED JSX) --- */}
+      <section className="p-6 bg-white rounded-lg shadow-md border border-gray-200">
+        <h2 className="text-xl font-semibold text-slate-800 mb-4">
           Teams ({teams.length})
         </h2>
         {teams.length > 0 ? (
-          <ul className="space-y-2">
+          <ul className="divide-y divide-gray-200">
             {teams.map((t) => (
-              <li key={t.id} className="p-2 text-gray-500 border-b">
-                <span className="text-gray-500 font-semibold">{t.name}</span> -
-                Captain:{" "}
-                {participants.find((p) => p.uid === t.captainId)?.displayName ||
-                  "N/A"}
-                {/* Optionally list members */}
-                {/* <ul className="text-sm pl-4">
-                         {t.memberIds.map(mid => <li key={mid}>{participants.find(p=>p.uid === mid)?.displayName || mid.substring(0,5)}</li>)}
-                      </ul> */}
+              <li key={t.id} className="py-2">
+                <p className="text-sm font-medium text-slate-900">{t.name}</p>
+                <p className="text-xs text-slate-500">
+                  Captain:{" "}
+                  {participants.find((p) => p.uid === t.captainId)
+                    ?.displayName || "N/A"}
+                </p>
               </li>
             ))}
           </ul>
         ) : (
-          <p className="text-gray-500 italic">
-            No teams created yet (captains not assigned).
-          </p>
+          <p className="text-sm text-slate-500 italic">No teams created yet.</p>
         )}
-      </div>
+      </section>
+
+      {/* --- Delete Event Section (RESTORED JSX) --- */}
+      {isAdmin && (
+        <section className="mt-10 p-6 bg-red-50 border border-red-200 rounded-lg shadow-sm">
+          <h2 className="text-xl font-semibold text-red-800 mb-3">
+            Danger Zone
+          </h2>
+          <p className="text-sm text-red-700 mb-4">
+            Delete event permanently? This cannot be undone.
+          </p>
+          {error && isDeleting && (
+            <p className="text-sm font-medium text-red-600 bg-red-100 p-2 rounded-md mb-3">
+              {error}
+            </p>
+          )}
+          <button
+            onClick={handleDeleteEvent}
+            disabled={isDeleting}
+            className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isDeleting ? "Deleting..." : "Delete Event Permanently"}
+          </button>
+        </section>
+      )}
     </div>
   );
 }
