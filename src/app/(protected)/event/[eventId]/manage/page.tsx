@@ -279,10 +279,13 @@ export default function ManageEventPage() {
 
   const handleCreateSubEvent = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!eventData || !subEventName.trim() || !currentUser) return;
-    // Client-side check for admin (optional, rules enforce)
-    if (currentUser.uid !== eventData.adminId) {
-      setSubEventError("Permission Denied");
+    if (
+      !eventData ||
+      !subEventName.trim() ||
+      !currentUser ||
+      currentUser.uid !== eventData.adminId
+    ) {
+      setSubEventError("Invalid input or permission denied.");
       return;
     }
     setSubEventLoading(true);
@@ -290,14 +293,13 @@ export default function ManageEventPage() {
     try {
       const subEventsCollectionRef = collection(db, "subEvents");
       await addDoc(subEventsCollectionRef, {
-        eventId: eventData.id,
+        eventId: eventData.id, // Use confirmed non-null eventData
         name: subEventName.trim(),
-        assignedParticipants: {},
-        status: "upcoming",
+        assignedParticipants: {}, // Initialize empty map
+        status: "upcoming", // Initial status
         createdAt: serverTimestamp(),
       });
       setSubEventName("");
-      // Refetch sub-events
       const subEventsQuery = query(
         collection(db, "subEvents"),
         where("eventId", "==", eventId)
@@ -308,9 +310,11 @@ export default function ManageEventPage() {
         name: doc.data().name || "Unnamed",
       }));
       setSubEvents(fetchedSubEvents);
+      // Option 2: Refetch everything (simpler if other state might change)
+      // fetchEventDetails();
     } catch (err: any) {
       console.error("Error creating sub-event:", err);
-      setSubEventError("Failed to create sub-event: " + err.message);
+      setSubEventError("Failed to create sub-event. " + err.message);
     } finally {
       setSubEventLoading(false);
     }
@@ -536,7 +540,9 @@ export default function ManageEventPage() {
       {/* Invitation Section (Admin Only) */}
       {isAdmin && canInvite && (
         <div className="p-4 md:p-6 bg-white rounded shadow-md border border-gray-200">
-          <h2 className="text-xl font-semibold mb-4">Invite Participants</h2>
+          <h2 className="text-xl text-gray-700 font-semibold mb-4">
+            Invite Participants
+          </h2>
           <form onSubmit={handleInvite}>
             <div className="mb-4">
               <label
@@ -583,7 +589,7 @@ export default function ManageEventPage() {
       {/* Captain Assignment Section (Admin Only) */}
       {isAdmin && canAssignCaptains && (
         <div className="p-4 md:p-6 bg-white rounded shadow-md border border-gray-200">
-          <h2 className="text-xl font-semibold mb-4">
+          <h2 className="text-xl text-gray-700 font-semibold mb-4">
             Assign Captains ({teams.length} / {eventData.numberOfTeams})
           </h2>
           {participants.length > 0 ? (
@@ -593,7 +599,7 @@ export default function ManageEventPage() {
                   key={p.uid}
                   className="flex flex-col sm:flex-row justify-between items-start sm:items-center p-2 border-b"
                 >
-                  <span className="mb-1 sm:mb-0">
+                  <span className="mb-1 text-gray-700 sm:mb-0">
                     {p.displayName} ({p.role}){" "}
                     {p.teamId &&
                       `- ${
@@ -676,11 +682,13 @@ export default function ManageEventPage() {
 
       {/* Sub-Events Section (Create: Admin Only, List: All Authorized) */}
       <div className="p-4 md:p-6 bg-white rounded shadow-md border border-gray-200">
-        <h2 className="text-xl font-semibold mb-4">Sub-Events</h2>
+        <h2 className="text-xl text-gray-700 font-semibold mb-4">Sub-Events</h2>
         {/* Create Form (Admin Only) */}
         {isAdmin && canCreateSubEvents && (
           <form onSubmit={handleCreateSubEvent} className="mb-6 border-b pb-4">
-            <h3 className="text-lg font-medium mb-2">Create New Sub-Event</h3>
+            <h3 className="text-lg text-gray-700 font-medium mb-2">
+              Create New Sub-Event
+            </h3>
             <div className="mb-3">
               <label
                 htmlFor="subEventName"
@@ -711,7 +719,7 @@ export default function ManageEventPage() {
           </form>
         )}
         {/* List (Visible to All Authorized) */}
-        <h3 className="text-lg font-medium mb-2">
+        <h3 className="text-lg text-gray-700 font-medium mb-2">
           Existing Sub-Events ({subEvents.length})
         </h3>
         {subEvents.length > 0 ? (
@@ -739,13 +747,13 @@ export default function ManageEventPage() {
 
       {/* Participant List (Optional - Visible to All Authorized) */}
       <div className="p-4 md:p-6 bg-white rounded shadow-md border border-gray-200">
-        <h2 className="text-xl font-semibold mb-4">
+        <h2 className="text-xl text-gray-700 font-semibold mb-4">
           Participants ({participants.length})
         </h2>
         {participants.length > 0 ? (
           <ul className="space-y-2">
             {participants.map((p) => (
-              <li key={p.uid} className="p-2 border-b">
+              <li key={p.uid} className="text-gray-500 p-2 border-b">
                 {p.displayName} ({p.role}){" "}
                 {p.teamId &&
                   `- ${
@@ -764,12 +772,15 @@ export default function ManageEventPage() {
 
       {/* Team List (Optional - Visible to All Authorized) */}
       <div className="p-4 md:p-6 bg-white rounded shadow-md border border-gray-200">
-        <h2 className="text-xl font-semibold mb-4">Teams ({teams.length})</h2>
+        <h2 className="text-xl text-gray-700 font-semibold mb-4">
+          Teams ({teams.length})
+        </h2>
         {teams.length > 0 ? (
           <ul className="space-y-2">
             {teams.map((t) => (
-              <li key={t.id} className="p-2 border-b">
-                <span className="font-semibold">{t.name}</span> - Captain:{" "}
+              <li key={t.id} className="p-2 text-gray-500 border-b">
+                <span className="text-gray-500 font-semibold">{t.name}</span> -
+                Captain:{" "}
                 {participants.find((p) => p.uid === t.captainId)?.displayName ||
                   "N/A"}
                 {/* Optionally list members */}
