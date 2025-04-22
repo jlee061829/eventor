@@ -77,9 +77,9 @@ export default function ProtectedLayout({ children }: { children: ReactNode }) {
 
   // Render the navbar and the protected page content
   return (
-    <div>
+    <div className="bg-gradient-to-br from-green-400 to-blue-500">
       <Navbar />
-      <main className="container mx-auto p-4">{children}</main>
+      <main className="container mx-auto p-4 bg-gradient-to-br from-green-400 to-blue-500">{children}</main>
     </div>
   );
 }
