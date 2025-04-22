@@ -16,7 +16,7 @@ import {
   arrayUnion,
   query,
   where,
-  getDocs, // <-- Make sure getDocs is imported
+  getDocs,
   writeBatch,
   Timestamp,
   runTransaction,
@@ -36,8 +36,8 @@ interface TeamData {
   name: string;
   captainId: string;
   memberIds: string[];
-  eventId: string; // Ensure eventId is part of the team data
-  createdAt: Timestamp; // Keep timestamps consistent
+  eventId: string;
+  createdAt: Timestamp;
 }
 
 interface EventData {
@@ -46,31 +46,29 @@ interface EventData {
   adminId: string;
   status: string;
   numberOfTeams: number;
-  participantEmails: string[]; // Emails of those invited
-  participantIds: string[]; // UIDs of those who accepted
-  availableForDraftIds: string[]; // UIDs available after captains assigned
+  participantEmails: string[];
+  participantIds: string[];
+  availableForDraftIds: string[];
   createdAt: Timestamp;
 }
 
 // --- Component Start ---
 export default function ManageEventPage() {
-  // --- State Variables (Keep your existing state) ---
-  const { currentUser } = useAuth(); // Assuming useAuth provides userProfile with role
+  // --- State Variables ---
+  const { currentUser } = useAuth();
   const router = useRouter();
   const params = useParams();
   const eventId = params.eventId as string;
 
-  const [subEventName, setSubEventName] = useState("");
-  const [subEventLoading, setSubEventLoading] = useState(false);
-  const [subEventError, setSubEventError] = useState<string | null>(null);
-  const [subEvents, setSubEvents] = useState<{ id: string; name: string }[]>(
-    []
-  );
   const [eventData, setEventData] = useState<EventData | null>(null);
   const [participants, setParticipants] = useState<ParticipantProfile[]>([]);
   const [teams, setTeams] = useState<TeamData[]>([]);
+  const [subEvents, setSubEvents] = useState<{ id: string; name: string }[]>(
+    []
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [accessDenied, setAccessDenied] = useState(false); // New state for access control
 
   // Invite specific state
   const [inviteEmail, setInviteEmail] = useState("");
@@ -78,21 +76,31 @@ export default function ManageEventPage() {
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteSuccess, setInviteSuccess] = useState<string | null>(null);
 
+  // Sub-event specific state
+  const [subEventName, setSubEventName] = useState("");
+  const [subEventLoading, setSubEventLoading] = useState(false);
+  const [subEventError, setSubEventError] = useState<string | null>(null);
+
+  // Action loading state
   const [actionLoading, setActionLoading] = useState(false);
 
-  // --- Fetch Event Details (Keep your existing fetch logic) ---
+  // --- Fetch Event Details (MODIFIED ACCESS CHECK) ---
   const fetchEventDetails = useCallback(async () => {
-    // Keep your existing fetchEventDetails logic...
-    // Added fetching sub-events inside the main try block for consistency
-    if (!eventId || !currentUser) return;
+    if (!eventId || !currentUser) {
+      setLoading(false);
+      setError("Authentication required to view event details.");
+      return;
+    }
+
     setLoading(true);
     setError(null);
+    setAccessDenied(false); // Reset access denied state
     setParticipants([]);
     setTeams([]);
-    setSubEvents([]); // Also reset sub-events
+    setSubEvents([]);
 
     try {
-      // Fetch Event Data
+      // Fetch Event Data first
       const eventDocRef = doc(db, "events", eventId);
       const eventDocSnap = await getDoc(eventDocRef);
 
@@ -105,183 +113,180 @@ export default function ManageEventPage() {
         ...eventDocSnap.data(),
       } as EventData;
 
-      // Use userProfile.role for checks if available, otherwise fallback/adjust logic
-      // For this page, we primarily need to check if they are the event admin
-      if (fetchedEventData.adminId !== currentUser.uid) {
-        throw new Error("Access Denied: You are not the admin of this event.");
-      }
-      setEventData(fetchedEventData);
+      // --- *** MODIFIED ACCESS CHECK *** ---
+      // Check if the current user is EITHER the admin OR a participant
+      const isAdmin = fetchedEventData.adminId === currentUser.uid;
+      // Ensure participantIds exists and is an array before checking includes
+      const isParticipant =
+        Array.isArray(fetchedEventData.participantIds) &&
+        fetchedEventData.participantIds.includes(currentUser.uid);
 
-      // Fetch Participants
-      if (
-        fetchedEventData.participantIds &&
-        fetchedEventData.participantIds.length > 0
-      ) {
-        const usersCollectionRef = collection(db, "users");
-        if (fetchedEventData.participantIds.length > 30) {
-          console.warn(
-            "Fetching more than 30 participants, consider chunking."
-          );
-        }
-        const usersQuery = query(
-          usersCollectionRef,
-          where(
-            documentId(),
-            "in",
-            fetchedEventData.participantIds.slice(0, 30)
-          ) // Limit to 30 for 'in' query
-          // TODO: Add logic here to handle > 30 participant IDs if necessary (multiple queries)
-        );
-        const usersSnapshot = await getDocs(usersQuery);
-        const fetchedParticipants = usersSnapshot.docs.map((doc) => ({
-          uid: doc.id,
-          displayName: doc.data().displayName || "N/A",
-          role: doc.data().role || "participant", // Assuming role is stored in user doc
-          teamId: doc.data().teamId || null, // Assuming teamId is stored in user doc
-        })) as ParticipantProfile[];
-        setParticipants(fetchedParticipants);
+      if (!isAdmin && !isParticipant) {
+        // If user is NEITHER admin nor participant, deny access
+        setAccessDenied(true);
+        setEventData(null); // Clear data if access denied
       } else {
-        setParticipants([]);
+        // If user IS admin or participant, proceed
+        setEventData(fetchedEventData);
+
+        // Fetch Participants (if needed for display - consider optimizing if only admin needs full list)
+        if (
+          fetchedEventData.participantIds &&
+          fetchedEventData.participantIds.length > 0
+        ) {
+          const usersCollectionRef = collection(db, "users");
+          // Handle potential chunking for > 30 participants
+          const participantChunks = [];
+          for (let i = 0; i < fetchedEventData.participantIds.length; i += 30) {
+            participantChunks.push(
+              fetchedEventData.participantIds.slice(i, i + 30)
+            );
+          }
+          const participantPromises = participantChunks.map((chunk) =>
+            getDocs(query(usersCollectionRef, where(documentId(), "in", chunk)))
+          );
+          const participantSnapshots = await Promise.all(participantPromises);
+          const fetchedParticipants = participantSnapshots.flatMap((snapshot) =>
+            snapshot.docs.map(
+              (doc) =>
+                ({
+                  uid: doc.id,
+                  displayName: doc.data().displayName || "N/A",
+                  role: doc.data().role || "participant",
+                  teamId: doc.data().teamId || null,
+                } as ParticipantProfile)
+            )
+          );
+          setParticipants(fetchedParticipants);
+        } else {
+          setParticipants([]);
+        }
+
+        // Fetch Teams
+        const teamsCollectionRef = collection(db, "teams");
+        const teamsQuery = query(
+          teamsCollectionRef,
+          where("eventId", "==", eventId)
+        );
+        const teamsSnapshot = await getDocs(teamsQuery);
+        const fetchedTeams = teamsSnapshot.docs.map(
+          (doc) =>
+            ({
+              id: doc.id,
+              ...doc.data(),
+            } as TeamData)
+        );
+        setTeams(fetchedTeams);
+
+        // Fetch Sub-Events
+        const subEventsQuery = query(
+          collection(db, "subEvents"),
+          where("eventId", "==", eventId)
+        );
+        const subEventsSnapshot = await getDocs(subEventsQuery);
+        const fetchedSubEvents = subEventsSnapshot.docs.map((doc) => ({
+          id: doc.id,
+          name: doc.data().name || "Unnamed Sub-Event",
+        }));
+        setSubEvents(fetchedSubEvents);
       }
-
-      // Fetch Teams
-      const teamsCollectionRef = collection(db, "teams");
-      const teamsQuery = query(
-        teamsCollectionRef,
-        where("eventId", "==", eventId)
-      );
-      const teamsSnapshot = await getDocs(teamsQuery);
-      const fetchedTeams = teamsSnapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-      })) as TeamData[];
-      setTeams(fetchedTeams);
-
-      // Fetch Sub-Events
-      const subEventsQuery = query(
-        collection(db, "subEvents"),
-        where("eventId", "==", eventId)
-      );
-      const subEventsSnapshot = await getDocs(subEventsQuery);
-      const fetchedSubEvents = subEventsSnapshot.docs.map((doc) => ({
-        id: doc.id,
-        name: doc.data().name || "Unnamed Sub-Event",
-      }));
-      setSubEvents(fetchedSubEvents);
+      // --- *** END MODIFIED ACCESS CHECK *** ---
     } catch (err: any) {
       console.error("Error fetching event details:", err);
-      setError("Failed to load event data. " + err.message);
-      if (err.message.startsWith("Access Denied")) {
-        // Consider redirecting only if the core event fetch failed due to access
-        // router.push("/dashboard");
+      // If the error wasn't explicitly set to access denied, show general error
+      if (!accessDenied) {
+        setError("Failed to load event data. " + err.message);
       }
     } finally {
       setLoading(false);
     }
-  }, [eventId, currentUser, router]); // Removed router dependency if redirect only happens on critical error
+  }, [eventId, currentUser]); // Removed router from dependencies as it wasn't used here
 
   useEffect(() => {
     if (currentUser && eventId) {
-      // Ensure currentUser and eventId are available
       fetchEventDetails();
     } else if (!currentUser) {
-      // Handle case where user is not logged in yet or context is loading
-      setLoading(false); // Stop loading indicator
-      setError("Authentication required."); // Show appropriate message
+      setLoading(false);
+      setError("Authentication required.");
+      setEventData(null); // Clear data if user logs out
     }
-  }, [currentUser, eventId, fetchEventDetails]); // Depend on currentUser and eventId
+  }, [currentUser, eventId, fetchEventDetails]);
 
-  // --- Invitation Logic ---
+  // --- Handler Functions (No logical change needed, security rules enforce permissions) ---
   const handleInvite = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inviteEmail.trim() || !eventData || !currentUser) {
-      setInviteError("Email is required and event data must be loaded.");
+      setInviteError("Email required, event loaded, and user logged in.");
       return;
     }
-    // Basic Email Validation
     if (!/\S+@\S+\.\S+/.test(inviteEmail)) {
-      setInviteError("Please enter a valid email address.");
+      setInviteError("Invalid email format.");
       return;
     }
-
+    // --- Console logs for debugging (can be removed later) ---
+    console.log("--- Invite Debug ---");
+    console.log("Event ID:", eventData?.id);
+    console.log("Event Admin ID:", eventData?.adminId);
+    console.log("Current User UID:", currentUser?.uid);
+    console.log("Is Admin?:", currentUser?.uid === eventData?.adminId);
+    console.log(
+      "Event Name:",
+      eventData?.name,
+      "| Type:",
+      typeof eventData?.name
+    );
+    console.log("--------------------");
+    // --- End logs ---
     setIsInviting(true);
     setInviteError(null);
     setInviteSuccess(null);
-    const emailToInvite = inviteEmail.trim().toLowerCase(); // Normalize email
-
+    const emailToInvite = inviteEmail.trim().toLowerCase();
     try {
-      // *** ADDED: Check if already invited to this event ***
+      // Duplicate Check (Client-side check, consider Cloud Function for robustness)
       const invitesCol = collection(db, "invites");
       const q = query(
         invitesCol,
         where("eventId", "==", eventData.id),
-        where("recipientEmail", "==", emailToInvite) // Check against the normalized email
+        where("recipientEmail", "==", emailToInvite)
       );
       const existingInviteSnap = await getDocs(q);
       if (!existingInviteSnap.empty) {
-        // Optional: Check status? Maybe resend if declined? For now, just prevent duplicate pending invites.
-        // const existingStatus = existingInviteSnap.docs[0].data().status;
-        // if (existingStatus === 'pending' || existingStatus === 'accepted') {
-        throw new Error(
-          `${emailToInvite} has already been invited or accepted for this event.`
-        );
-        // }
+        throw new Error(`${emailToInvite} already invited/accepted.`);
       }
-      // *** END ADDED CHECK ***
-
-      // Use a batch write to perform both actions atomically if desired,
-      // though creating the invite first is usually fine.
-      // const batch = writeBatch(db);
-
-      // 1. Create the invite document
-      const inviteDocRef = await addDoc(collection(db, "invites"), {
+      // 1. Create invite doc
+      await addDoc(collection(db, "invites"), {
         eventId: eventData.id,
         recipientEmail: emailToInvite,
         status: "pending",
-        sentBy: currentUser.uid, // Use currentUser.uid
+        sentBy: currentUser.uid,
         createdAt: serverTimestamp(),
-        eventName: eventData.name, // Keep eventName if your invitation page uses it
+        eventName: eventData.name,
       });
-      // batch.set(doc(db, "invites", inviteDocRef.id), { ... }); // If using batch
-
-      // 2. Update the event document (optional, depending on your needs)
-      // This array is useful for quickly seeing who was invited, but the 'invites' collection is the source of truth for status.
+      // 2. Update event doc (participantEmails)
       const eventRef = doc(db, "events", eventData.id);
       await updateDoc(eventRef, {
         participantEmails: arrayUnion(emailToInvite),
       });
-      // batch.update(eventRef, { participantEmails: arrayUnion(emailToInvite) }); // If using batch
-
-      // await batch.commit(); // If using batch
-
       setInviteSuccess(`Invitation sent to ${emailToInvite}!`);
-      setInviteEmail(""); // Clear the input field
-      // No need to refetch all event details just for this, unless you display participantEmails list here.
-      // fetchEventDetails(); // Remove if not displaying participantEmails directly
+      setInviteEmail("");
     } catch (err: any) {
       console.error("Error sending invitation:", err);
-      // Display specific error from duplicate check
       setInviteError(err.message || "Failed to send invitation.");
     } finally {
       setIsInviting(false);
     }
   };
 
-  // --- Keep handleCreateSubEvent ---
   const handleCreateSubEvent = async (e: React.FormEvent) => {
-    // ... (keep your existing logic)
     e.preventDefault();
-    if (
-      !eventData ||
-      !subEventName.trim() ||
-      currentUser?.uid !== eventData.adminId
-    ) {
-      setSubEventError("Invalid input or permission denied.");
+    if (!eventData || !subEventName.trim() || !currentUser) return;
+    // Client-side check for admin (optional, rules enforce)
+    if (currentUser.uid !== eventData.adminId) {
+      setSubEventError("Permission Denied");
       return;
     }
     setSubEventLoading(true);
     setSubEventError(null);
-
     try {
       const subEventsCollectionRef = collection(db, "subEvents");
       await addDoc(subEventsCollectionRef, {
@@ -292,7 +297,7 @@ export default function ManageEventPage() {
         createdAt: serverTimestamp(),
       });
       setSubEventName("");
-      // Fetch ONLY sub-events again for efficiency, or update state directly
+      // Refetch sub-events
       const subEventsQuery = query(
         collection(db, "subEvents"),
         where("eventId", "==", eventId)
@@ -300,124 +305,95 @@ export default function ManageEventPage() {
       const subEventsSnapshot = await getDocs(subEventsQuery);
       const fetchedSubEvents = subEventsSnapshot.docs.map((doc) => ({
         id: doc.id,
-        name: doc.data().name || "Unnamed Sub-Event",
+        name: doc.data().name || "Unnamed",
       }));
       setSubEvents(fetchedSubEvents);
-      // setSubEvents(prev => [...prev, { id: newSubEvent.id, name: subEventName.trim() }]); // Alternative direct update
     } catch (err: any) {
       console.error("Error creating sub-event:", err);
-      setSubEventError("Failed to create sub-event. " + err.message);
+      setSubEventError("Failed to create sub-event: " + err.message);
     } finally {
       setSubEventLoading(false);
     }
   };
 
-  // --- Keep handleMakeCaptain ---
   const handleMakeCaptain = async (participant: ParticipantProfile) => {
-    // ... (keep your existing logic)
-    if (!eventData || !currentUser || currentUser.uid !== eventData.adminId) {
+    if (!eventData || !currentUser) return;
+    // Client-side checks (optional, rules enforce)
+    if (currentUser.uid !== eventData.adminId) {
       setError("Permission Denied.");
       return;
     }
     if (teams.length >= eventData.numberOfTeams) {
-      setError(
-        `Cannot assign more captains. Max teams (${eventData.numberOfTeams}) reached.`
-      );
+      setError(`Max teams (${eventData.numberOfTeams}) reached.`);
       return;
     }
     if (participant.role !== "participant") {
-      setError(`${participant.displayName} is already a ${participant.role}.`);
+      setError(`${participant.displayName} already a ${participant.role}.`);
       return;
     }
 
     setActionLoading(true);
     setError(null);
-
     const batch = writeBatch(db);
     const userRef = doc(db, "users", participant.uid);
-    const newTeamRef = doc(collection(db, "teams")); // Generate new team ID
-
+    const newTeamRef = doc(collection(db, "teams"));
     try {
-      // Find next available team name/number
-      const existingTeamNumbers = teams.map((t) => {
-        const match = t.name.match(/^Team (\d+)$/);
-        return match ? parseInt(match[1], 10) : 0;
-      });
+      const existingTeamNumbers = teams.map((t) =>
+        parseInt(t.name.match(/\d+$/)?.[0] || "0", 10)
+      );
       const nextTeamNumber = Math.max(0, ...existingTeamNumbers) + 1;
-
-      // 1. Create Team
+      // Create Team
       batch.set(newTeamRef, {
         eventId: eventData.id,
-        name: `Team ${nextTeamNumber}`, // Better naming
+        name: `Team ${nextTeamNumber}`,
         captainId: participant.uid,
         memberIds: [participant.uid],
         createdAt: serverTimestamp(),
       });
-
-      // 2. Update User Role & Team ID
-      batch.update(userRef, {
-        role: "captain",
-        teamId: newTeamRef.id,
-      });
-
-      // 3. Update Event's Available For Draft List (remove new captain)
+      // Update User Role & Team ID
+      batch.update(userRef, { role: "captain", teamId: newTeamRef.id });
+      // Update Event's Available For Draft List
       const eventRef = doc(db, "events", eventData.id);
       batch.update(eventRef, {
-        // Ensure availableForDraftIds is treated as an array even if null/undefined initially
         availableForDraftIds: (eventData.availableForDraftIds || []).filter(
           (id) => id !== participant.uid
         ),
       });
-
       await batch.commit();
-      console.log(
-        `${participant.displayName} promoted to captain of Team ${nextTeamNumber}`
-      );
-      fetchEventDetails(); // Refetch needed to update participants, teams, eventData (available list)
+      console.log(`${participant.displayName} promoted to captain`);
+      fetchEventDetails(); // Refetch needed
     } catch (err: any) {
       console.error("Error making captain:", err);
-      setError(
-        `Failed to make ${participant.displayName} a captain. ${err.message}`
-      );
+      setError(`Failed to make captain: ${err.message}`);
     } finally {
       setActionLoading(false);
     }
   };
 
-  // --- Keep handleStartDraft ---
   const handleStartDraft = async () => {
-    // ... (keep your existing logic)
-    if (!eventData || !currentUser || currentUser.uid !== eventData.adminId) {
+    if (!eventData || !currentUser) return;
+    // Client-side checks (optional, rules enforce)
+    if (currentUser.uid !== eventData.adminId) {
       setError("Permission Denied.");
       return;
     }
     if (teams.length !== eventData.numberOfTeams) {
-      setError(
-        `Cannot start draft. Expected ${eventData.numberOfTeams} teams, found ${teams.length}.`
-      );
+      setError(`Need ${eventData.numberOfTeams} teams, have ${teams.length}.`);
       return;
     }
     if (["drafting", "active", "completed"].includes(eventData.status)) {
-      setError(
-        `Draft cannot be started. Event status is '${eventData.status}'.`
-      );
+      setError(`Event status '${eventData.status}' prevents starting draft.`);
       return;
     }
-    // Ensure availableForDraftIds exists and has players *beyond* the captains
-    const numAvailableToDraft = (eventData.availableForDraftIds || []).length;
-    if (numAvailableToDraft === 0) {
-      setError(
-        "Cannot start draft. No participants available to be drafted (besides captains)."
-      );
+    if ((eventData.availableForDraftIds || []).length === 0) {
+      setError("No participants available to draft.");
       return;
     }
 
     setActionLoading(true);
     setError(null);
-
     const draftRef = doc(db, "drafts", eventId);
     const eventRef = doc(db, "events", eventId);
-
     const teamIds = teams.map((team) => team.id);
     const shuffleArray = (array: string[]) => {
       /* ... keep shuffle logic ... */
@@ -428,28 +404,24 @@ export default function ManageEventPage() {
       return array;
     };
     const randomizedPickOrder = shuffleArray([...teamIds]);
-
     try {
       await runTransaction(db, async (transaction) => {
         const freshEventSnap = await transaction.get(eventRef);
         if (!freshEventSnap.exists()) {
-          throw new Error("Event disappeared unexpectedly.");
+          throw new Error("Event disappeared.");
         }
         const freshEventData = freshEventSnap.data();
         if (
           !freshEventData ||
-          (freshEventData.status !== "setup" &&
-            freshEventData.status !== "inviting" &&
-            freshEventData.status !== "assigningCaptains")
+          !["setup", "inviting", "assigningCaptains"].includes(
+            freshEventData.status
+          )
         ) {
           throw new Error(
-            `Event status (${
-              freshEventData?.status || "unknown"
-            }) prevents starting the draft.`
+            `Event status (${freshEventData?.status}) prevents starting draft.`
           );
         }
-
-        // Set the draft document
+        // Set draft doc
         transaction.set(draftRef, {
           eventId: eventData.id,
           status: "active",
@@ -457,51 +429,50 @@ export default function ManageEventPage() {
           currentPickIndex: 0,
           roundNumber: 1,
           totalPicksMade: 0,
-          lastPickTimestamp: serverTimestamp(), // Use Firestore server timestamp
-          // availablePlayers: eventData.availableForDraftIds // Store initial snapshot if needed
+          lastPickTimestamp: serverTimestamp(),
         });
-
         // Update event status
         transaction.update(eventRef, { status: "drafting" });
       });
-
-      console.log("Draft started successfully!");
-      fetchEventDetails(); // Refresh manage page state (event status changes)
-      // Optionally redirect: router.push(`/event/${eventId}/draft`);
+      console.log("Draft started!");
+      fetchEventDetails(); // Refresh state
     } catch (err: any) {
       console.error("Error starting draft:", err);
-      setError(`Failed to start draft. ${err.message}`);
+      setError(`Failed to start draft: ${err.message}`);
     } finally {
       setActionLoading(false);
     }
   };
 
-  // --- Render Logic ---
+  // --- *** RENDER LOGIC *** ---
+
+  // Determine if the current user is the admin for this specific event
+  const isAdmin = currentUser?.uid === eventData?.adminId;
+
+  // --- Loading, Access Denied, Error Handling ---
   if (loading)
     return (
       <div className="container mx-auto p-4 text-center">
         Loading event details...
       </div>
     );
-  // Show specific error or a generic message if eventData is null after loading completed without error state
-  if (!eventData && !error)
+  if (accessDenied)
     return (
       <div className="container mx-auto p-4 text-center text-red-500">
-        Event data could not be loaded or access denied.
+        Access Denied: You are not authorized to view this event.
       </div>
     );
   if (error)
     return <div className="container mx-auto p-4 text-red-500">{error}</div>;
-  // We check error first, so if eventData is null here, it's unexpected unless loading didn't finish?
-  // Let's assume if we reach here, eventData is valid.
+  // If eventData is null after loading without error/accessDenied, something unexpected happened
   if (!eventData)
     return (
-      <div className="container mx-auto p-4 text-center text-red-500">
-        An unexpected error occurred.
+      <div className="container mx-auto p-4 text-center text-gray-500">
+        Event data could not be loaded.
       </div>
     );
 
-  // Simplify conditions
+  // --- Calculate status conditions based on fetched eventData ---
   const canAssignCaptains = !["drafting", "active", "completed"].includes(
     eventData.status
   );
@@ -509,18 +480,21 @@ export default function ManageEventPage() {
   const canStartDraft =
     teams.length === eventData.numberOfTeams &&
     ["setup", "inviting", "assigningCaptains"].includes(eventData.status) &&
-    (eventData.availableForDraftIds || []).length > 0; // Must have players to draft
+    (eventData.availableForDraftIds || []).length > 0;
   const isDraftingOrLater = ["drafting", "active", "completed"].includes(
     eventData.status
   );
-  const canCreateSubEvents = !["setup", "inviting"].includes(eventData.status); // Allow once captains can be assigned
+  const canCreateSubEvents = !["setup", "inviting"].includes(eventData.status);
 
+  // --- Main Page Content ---
   return (
     <div className="container mx-auto p-4 space-y-8">
-      {/* --- Event Info (Keep as is) --- */}
+      {/* --- Event Info (Visible to Admin & Participants) --- */}
       <div>
-        <div className="flex justify-between items-center mb-4">
-          <h1 className="text-3xl font-bold">Manage Event: {eventData.name}</h1>
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4">
+          <h1 className="text-3xl font-bold mb-2 sm:mb-0">
+            Event: {eventData.name}
+          </h1>
           <div className="space-x-2">
             {isDraftingOrLater && (
               <Link
@@ -538,48 +512,31 @@ export default function ManageEventPage() {
             </Link>
           </div>
         </div>
-        <p>
-          <span className="font-semibold">Status:</span>{" "}
-          <span
-            className={`font-medium ${
-              eventData.status === "setup"
-                ? "text-gray-600"
-                : eventData.status === "inviting"
-                ? "text-blue-600"
-                : eventData.status === "assigningCaptains"
-                ? "text-purple-600"
-                : eventData.status === "drafting"
-                ? "text-yellow-600"
-                : eventData.status === "active"
-                ? "text-green-600"
-                : eventData.status === "completed"
-                ? "text-red-600"
-                : ""
-            }`}
-          >
-            {eventData.status}
-          </span>
-        </p>
-        <p>
-          <span className="font-semibold">Required Teams:</span>{" "}
-          {eventData.numberOfTeams}
-        </p>
-        <p>
-          <span className="font-semibold">Created Teams:</span> {teams.length}
-        </p>
-        <p>
-          <span className="font-semibold">Participants Accepted:</span>{" "}
-          {participants.length}
-        </p>
-        {/* Display emails invited (optional) */}
-        {/* <p><span className="font-semibold">Invited Emails:</span> {eventData.participantEmails?.join(', ') || 'None'}</p> */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+          <p>
+            <span className="font-semibold">Status:</span>{" "}
+            <span className={`font-medium $`}>{eventData.status}</span>
+          </p>
+          <p>
+            <span className="font-semibold">Required Teams:</span>{" "}
+            {eventData.numberOfTeams}
+          </p>
+          <p>
+            <span className="font-semibold">Created Teams:</span> {teams.length}
+          </p>
+          <p>
+            <span className="font-semibold">Participants:</span>{" "}
+            {participants.length}
+          </p>
+        </div>
       </div>
 
-      {/* --- Invitation Section (Cleaned Up) --- */}
-      {canInvite && (
-        <div className="p-6 bg-white rounded shadow-md border border-gray-200">
+      {/* --- *** CONDITIONAL ADMIN SECTIONS *** --- */}
+
+      {/* Invitation Section (Admin Only) */}
+      {isAdmin && canInvite && (
+        <div className="p-4 md:p-6 bg-white rounded shadow-md border border-gray-200">
           <h2 className="text-xl font-semibold mb-4">Invite Participants</h2>
-          {/* REMOVED DUPLICATE FORM - This is the single correct form */}
           <form onSubmit={handleInvite}>
             <div className="mb-4">
               <label
@@ -591,47 +548,41 @@ export default function ManageEventPage() {
               <input
                 type="email"
                 id="inviteEmail"
-                value={inviteEmail} // Correctly bound
+                value={inviteEmail}
                 onChange={(e) => {
                   setInviteEmail(e.target.value);
-                  setInviteError(null); // Clear error on typing
-                  setInviteSuccess(null); // Clear success on typing
+                  setInviteError(null);
+                  setInviteSuccess(null);
                 }}
                 required
                 className="w-full px-3 py-2 border rounded text-gray-700 focus:outline-none focus:ring focus:border-blue-300"
                 placeholder="example@email.com"
               />
             </div>
-
-            {/* Display feedback messages */}
             {inviteError && (
               <p className="text-red-500 text-sm mb-3">{inviteError}</p>
             )}
             {inviteSuccess && (
               <p className="text-green-600 text-sm mb-3">{inviteSuccess}</p>
             )}
-
-            {/* Submit Button */}
             <button
               type="submit"
-              disabled={isInviting || !inviteEmail.trim()} // Correctly disabled
+              disabled={isInviting || !inviteEmail.trim()}
               className={`w-full py-2 px-4 rounded text-white font-semibold ${
                 isInviting || !inviteEmail.trim()
                   ? "bg-gray-400 cursor-not-allowed"
-                  : "bg-blue-500 hover:bg-blue-600" // Changed color to blue for invites
+                  : "bg-blue-500 hover:bg-blue-600"
               }`}
             >
               {isInviting ? "Sending..." : "Send Invitation"}
             </button>
           </form>
-          {/* Optional: Display existing invites here */}
-          {/* <div className="mt-6"> ... logic to display invites fetched from 'invites' collection ... </div> */}
         </div>
       )}
 
-      {/* --- Captain Assignment Section (Keep as is, maybe add clearer condition) --- */}
-      {canAssignCaptains && (
-        <div className="p-6 bg-white rounded shadow-md border border-gray-200">
+      {/* Captain Assignment Section (Admin Only) */}
+      {isAdmin && canAssignCaptains && (
+        <div className="p-4 md:p-6 bg-white rounded shadow-md border border-gray-200">
           <h2 className="text-xl font-semibold mb-4">
             Assign Captains ({teams.length} / {eventData.numberOfTeams})
           </h2>
@@ -640,9 +591,9 @@ export default function ManageEventPage() {
               {participants.map((p) => (
                 <li
                   key={p.uid}
-                  className="flex justify-between items-center p-2 border-b"
+                  className="flex flex-col sm:flex-row justify-between items-start sm:items-center p-2 border-b"
                 >
-                  <span>
+                  <span className="mb-1 sm:mb-0">
                     {p.displayName} ({p.role}){" "}
                     {p.teamId &&
                       `- ${
@@ -650,23 +601,21 @@ export default function ManageEventPage() {
                         "Assigned Team"
                       }`}
                   </span>
-                  {/* Allow making captain only if they are 'participant' AND team limit not reached */}
                   {p.role === "participant" &&
                     teams.length < eventData.numberOfTeams && (
                       <button
                         onClick={() => handleMakeCaptain(p)}
                         disabled={actionLoading}
-                        className="bg-purple-500 hover:bg-purple-700 text-white text-sm font-bold py-1 px-2 rounded disabled:bg-gray-400"
+                        className="bg-purple-500 hover:bg-purple-700 text-white text-xs sm:text-sm font-bold py-1 px-2 rounded disabled:bg-gray-400 self-start sm:self-center"
                       >
                         {actionLoading ? "Assigning..." : "Make Captain"}
                       </button>
                     )}
                   {p.role === "captain" && (
-                    <span className="text-sm text-green-600 font-semibold">
+                    <span className="text-sm text-green-600 font-semibold self-start sm:self-center">
                       ✓ Captain
                     </span>
                   )}
-                  {/* Optionally add button to REMOVE captain status if needed */}
                 </li>
               ))}
             </ul>
@@ -675,66 +624,62 @@ export default function ManageEventPage() {
               No participants have accepted invitations yet.
             </p>
           )}
-          {/* Show error specific to this section if needed, or rely on general error state */}
-          {/* {assignCaptainError && <p className="text-red-500 text-sm mt-4">{assignCaptainError}</p>} */}
-          {error && <p className="text-red-500 text-sm mt-4">{error}</p>}{" "}
-          {/* Display general action errors */}
+          {error && <p className="text-red-500 text-sm mt-4">{error}</p>}
         </div>
       )}
 
-      {/* --- Start Draft Section (Keep as is, maybe add clearer condition) --- */}
-      <div className="p-6 bg-white rounded shadow-md border border-gray-200">
-        <h2 className="text-xl font-semibold mb-4">Draft Control</h2>
-        {eventData.status === "drafting" && (
-          <p className="text-yellow-600 font-medium mb-4">
-            Draft is in progress.
-          </p>
-        )}
-        {/* Show Start Draft button only if conditions are met */}
-        {canStartDraft && (
-          <button
-            onClick={handleStartDraft}
-            disabled={actionLoading}
-            className="bg-green-600 hover:bg-green-800 text-white font-bold py-2 px-4 rounded disabled:bg-gray-400 mr-2" // Added margin
-          >
-            {actionLoading ? "Starting..." : "Start Draft"}
-          </button>
-        )}
-        {/* Explain why draft can't be started if applicable */}
-        {!isDraftingOrLater && teams.length !== eventData.numberOfTeams && (
-          <p className="text-gray-500 italic mt-2">
-            Cannot start draft until exactly {eventData.numberOfTeams} captains
-            are assigned.
-          </p>
-        )}
-        {!isDraftingOrLater &&
-          teams.length === eventData.numberOfTeams &&
-          (eventData.availableForDraftIds || []).length === 0 && (
-            <p className="text-gray-500 italic mt-2">
-              Cannot start draft because there are no participants available to
-              be drafted (besides captains).
+      {/* Draft Control Section (Admin Only Actions) */}
+      {isAdmin && (
+        <div className="p-4 md:p-6 bg-white rounded shadow-md border border-gray-200">
+          <h2 className="text-xl font-semibold mb-4">Draft Control</h2>
+          {eventData.status === "drafting" && (
+            <p className="text-yellow-600 font-medium mb-4">
+              Draft is in progress.
             </p>
           )}
-        {/* Show Go to Draft Page link if drafting or later */}
-        {isDraftingOrLater && (
-          <Link
-            href={`/event/${eventId}/draft`}
-            className="bg-indigo-600 hover:bg-indigo-800 text-white font-bold py-2 px-4 rounded inline-block" // Make it inline-block for spacing
-          >
-            Go to Draft Page
-          </Link>
-        )}
-        {error && <p className="text-red-500 text-sm mt-4">{error}</p>}{" "}
-        {/* Display general action errors */}
-      </div>
+          {canStartDraft && (
+            <button
+              onClick={handleStartDraft}
+              disabled={actionLoading}
+              className="bg-green-600 hover:bg-green-800 text-white font-bold py-2 px-4 rounded disabled:bg-gray-400 mr-2"
+            >
+              {actionLoading ? "Starting..." : "Start Draft"}
+            </button>
+          )}
+          {!isDraftingOrLater && teams.length !== eventData.numberOfTeams && (
+            <p className="text-gray-500 italic mt-2 text-sm">
+              Cannot start draft until exactly {eventData.numberOfTeams}{" "}
+              captains are assigned.
+            </p>
+          )}
+          {!isDraftingOrLater &&
+            teams.length === eventData.numberOfTeams &&
+            (eventData.availableForDraftIds || []).length === 0 && (
+              <p className="text-gray-500 italic mt-2 text-sm">
+                Cannot start draft - no participants available (besides
+                captains).
+              </p>
+            )}
+          {isDraftingOrLater && (
+            <Link
+              href={`/event/${eventId}/draft`}
+              className="bg-indigo-600 hover:bg-indigo-800 text-white font-bold py-2 px-4 rounded inline-block"
+            >
+              Go to Draft Page
+            </Link>
+          )}
+          {error && <p className="text-red-500 text-sm mt-4">{error}</p>}
+        </div>
+      )}
 
-      {/* --- Sub-Events Section (Keep as is, maybe add clearer condition) --- */}
-      <div className="p-6 bg-white rounded shadow-md border border-gray-200">
+      {/* --- Sections Visible to Admin & Participants --- */}
+
+      {/* Sub-Events Section (Create: Admin Only, List: All Authorized) */}
+      <div className="p-4 md:p-6 bg-white rounded shadow-md border border-gray-200">
         <h2 className="text-xl font-semibold mb-4">Sub-Events</h2>
-        {/* Create Sub-Event Form */}
-        {canCreateSubEvents && ( // Show form only when appropriate
+        {/* Create Form (Admin Only) */}
+        {isAdmin && canCreateSubEvents && (
           <form onSubmit={handleCreateSubEvent} className="mb-6 border-b pb-4">
-            {/* ... form elements ... */}
             <h3 className="text-lg font-medium mb-2">Create New Sub-Event</h3>
             <div className="mb-3">
               <label
@@ -765,13 +710,7 @@ export default function ManageEventPage() {
             </button>
           </form>
         )}
-        {!canCreateSubEvents && (
-          <p className="text-gray-500 italic mb-4">
-            Sub-events can be created after the initial setup/invitation phase.
-          </p>
-        )}
-
-        {/* List Existing Sub-Events */}
+        {/* List (Visible to All Authorized) */}
         <h3 className="text-lg font-medium mb-2">
           Existing Sub-Events ({subEvents.length})
         </h3>
@@ -783,6 +722,7 @@ export default function ManageEventPage() {
                 className="flex justify-between items-center p-2 border rounded bg-gray-50"
               >
                 <span>{sub.name}</span>
+                {/* Link to sub-event details - might need permission checks on that page too */}
                 <Link
                   href={`/event/${eventId}/sub-event/${sub.id}`}
                   className="text-sm text-blue-600 hover:underline"
@@ -794,6 +734,55 @@ export default function ManageEventPage() {
           </ul>
         ) : (
           <p className="text-gray-500 italic">No sub-events created yet.</p>
+        )}
+      </div>
+
+      {/* Participant List (Optional - Visible to All Authorized) */}
+      <div className="p-4 md:p-6 bg-white rounded shadow-md border border-gray-200">
+        <h2 className="text-xl font-semibold mb-4">
+          Participants ({participants.length})
+        </h2>
+        {participants.length > 0 ? (
+          <ul className="space-y-2">
+            {participants.map((p) => (
+              <li key={p.uid} className="p-2 border-b">
+                {p.displayName} ({p.role}){" "}
+                {p.teamId &&
+                  `- ${
+                    teams.find((t) => t.id === p.teamId)?.name ||
+                    "Assigned Team"
+                  }`}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-gray-500 italic">
+            No participants have joined yet.
+          </p>
+        )}
+      </div>
+
+      {/* Team List (Optional - Visible to All Authorized) */}
+      <div className="p-4 md:p-6 bg-white rounded shadow-md border border-gray-200">
+        <h2 className="text-xl font-semibold mb-4">Teams ({teams.length})</h2>
+        {teams.length > 0 ? (
+          <ul className="space-y-2">
+            {teams.map((t) => (
+              <li key={t.id} className="p-2 border-b">
+                <span className="font-semibold">{t.name}</span> - Captain:{" "}
+                {participants.find((p) => p.uid === t.captainId)?.displayName ||
+                  "N/A"}
+                {/* Optionally list members */}
+                {/* <ul className="text-sm pl-4">
+                         {t.memberIds.map(mid => <li key={mid}>{participants.find(p=>p.uid === mid)?.displayName || mid.substring(0,5)}</li>)}
+                      </ul> */}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-gray-500 italic">
+            No teams created yet (captains not assigned).
+          </p>
         )}
       </div>
     </div>

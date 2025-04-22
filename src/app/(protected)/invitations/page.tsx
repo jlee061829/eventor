@@ -68,14 +68,10 @@ export default function InvitationsPage() {
   const handleAccept = async (invite: Invite) => {
     if (!currentUser || !currentUser.uid) return;
     if (currentUser.currentEventId) {
-      setError(
-        `You are already part of an event. Please leave your current event before joining another.`
-      );
-      // Optional: Provide a way to leave the current event if desired
+      setError(`You are already part of an event...`);
       return;
     }
-
-    setProcessingInviteId(invite.id); // Mark this invite as being processed
+    setProcessingInviteId(invite.id);
     setError(null);
 
     const inviteRef = doc(db, "invites", invite.id);
