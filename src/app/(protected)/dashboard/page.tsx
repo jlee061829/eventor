@@ -191,9 +191,9 @@ export default function DashboardPage() {
   );
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-100 to-gray-300 flex items-center justify-center">
+    <div className="min-h-screen bg-gradient-to-br from-green-400 to-blue-500 flex items-center justify-center">
       <div className="container mx-auto p-6 max-w-4xl">
-        <h1 className="text-4xl font-bold mb-6 text-center text-gray-800">
+        <h1 className="text-4xl font-bold mb-6 text-center text-white">
           Welcome back,{" "}
           <span className="font-medium">
             {currentUser.displayName || currentUser.email}
