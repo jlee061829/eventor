@@ -204,11 +204,26 @@ export default function ManageEventPage() {
       return;
     }
 
+    console.log("--- Invite Debug ---");
+    console.log("Event ID being used:", eventData?.id);
+    console.log("Admin ID loaded from Event Data:", eventData?.adminId);
+    console.log("Current User UID from Auth Context:", currentUser?.uid);
+    console.log(
+      "Is currentUser?.uid === eventData?.adminId ?",
+      currentUser?.uid === eventData?.adminId
+    );
+    console.log(
+      "Value of eventData.name being sent:",
+      eventData?.name,
+      "| Type:",
+      typeof eventData?.name
+    );
+    console.log("--------------------");
+
     setIsInviting(true);
     setInviteError(null);
     setInviteSuccess(null);
     const emailToInvite = inviteEmail.trim().toLowerCase(); // Normalize email
-
     try {
       // *** ADDED: Check if already invited to this event ***
       const invitesCol = collection(db, "invites");
