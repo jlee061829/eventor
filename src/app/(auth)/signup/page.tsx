@@ -5,7 +5,7 @@ import React, { useState } from "react";
 import { createUserWithEmailAndPassword, updateProfile } from "firebase/auth";
 import { doc, setDoc } from "firebase/firestore";
 import { auth, db } from "@/firebase.config";
-import { useRouter } from "next/navigation"; // Use next/navigation for App Router
+import { useRouter } from "next/navigation";
 
 export default function SignUpPage() {
   const [email, setEmail] = useState("");
@@ -16,7 +16,7 @@ export default function SignUpPage() {
 
   const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(null); // Clear previous errors
+    setError(null);
 
     if (!displayName.trim()) {
       setError("Display Name cannot be empty.");
@@ -31,36 +31,39 @@ export default function SignUpPage() {
       );
       const user = userCredential.user;
 
-      // Update Firebase Auth profile
       await updateProfile(user, { displayName: displayName });
 
-      // Create user document in Firestore
       await setDoc(doc(db, "users", user.uid), {
         uid: user.uid,
         email: user.email,
         displayName: displayName,
-        role: "participant", // Default role
+        role: "participant",
         createdAt: new Date(),
-        currentEventId: null, // Not part of an event initially
-        teamId: null, // Not on a team initially
+        currentEventId: null,
+        teamId: null,
       });
 
       console.log("User signed up and profile created:", user.uid);
-      router.push("/dashboard"); // Redirect to dashboard after sign up
+      router.push("/dashboard");
     } catch (err: any) {
       console.error("Error signing up:", err);
-      setError(err.message); // Show Firebase error message
+      setError(err.message);
     }
   };
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-gray-100">
-      <div className="p-8 bg-white rounded shadow-md w-full max-w-md">
-        <h2 className="text-2xl font-bold mb-6 text-center">Sign Up</h2>
+    <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-green-400 to-blue-500">
+      <div className="p-8 bg-white rounded-lg shadow-lg w-full max-w-md">
+        <h2 className="text-3xl font-extrabold mb-6 text-center text-gray-800">
+          Create Your Account
+        </h2>
+        <p className="text-center text-gray-600 mb-6">
+          Sign up to get started with Eventor
+        </p>
         <form onSubmit={handleSignUp}>
           <div className="mb-4">
-            <label className="block text-gray-700 mb-2" htmlFor="displayName">
-              Display Name (First Last)
+            <label className="block text-gray-700 font-medium mb-2" htmlFor="displayName">
+              Display Name
             </label>
             <input
               type="text"
@@ -68,12 +71,12 @@ export default function SignUpPage() {
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
               required
-              className="w-full px-3 py-2 border rounded text-gray-700" // Added text color
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
             />
           </div>
           <div className="mb-4">
-            <label className="block text-gray-700 mb-2" htmlFor="email">
-              Email
+            <label className="block text-gray-700 font-medium mb-2" htmlFor="email">
+              Email Address
             </label>
             <input
               type="email"
@@ -81,11 +84,11 @@ export default function SignUpPage() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
-              className="w-full px-3 py-2 border rounded text-gray-700" // Added text color
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
             />
           </div>
           <div className="mb-6">
-            <label className="block text-gray-700 mb-2" htmlFor="password">
+            <label className="block text-gray-700 font-medium mb-2" htmlFor="password">
               Password
             </label>
             <input
@@ -94,20 +97,22 @@ export default function SignUpPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              className="w-full px-3 py-2 border rounded text-gray-700" // Added text color
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
             />
           </div>
-          {error && <p className="text-red-500 text-sm mb-4">{error}</p>}
+          {error && (
+            <p className="text-red-500 text-sm mb-4 text-center">{error}</p>
+          )}
           <button
             type="submit"
-            className="w-full bg-blue-500 text-white py-2 rounded hover:bg-blue-600"
+            className="w-full bg-green-600 text-white py-2 rounded-lg font-medium hover:bg-green-700 transition duration-200"
           >
             Sign Up
           </button>
         </form>
-        <p className="mt-4 text-center text-sm text-gray-600">
+        <p className="mt-6 text-center text-sm text-gray-600">
           Already have an account?{" "}
-          <a href="/login" className="text-blue-500 hover:underline">
+          <a href="/login" className="text-green-500 hover:underline">
             Log In
           </a>
         </p>
